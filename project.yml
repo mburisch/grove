@@ -1,6 +1,6 @@
 name: GitIt
 options:
-  bundleIdPrefix: com.mburisch
+  bundleIdPrefix: io.github.mburisch
   deploymentTarget:
     macOS: "27.0"
   createIntermediateGroups: true
@@ -24,7 +24,7 @@ targets:
         LSUIElement: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.mburisch.GitIt
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.mburisch.GitIt
         SWIFT_VERSION: "6.0"
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
