@@ -269,6 +269,13 @@ final class AppModel {
         await runLimited(repos) { await self.fetch($0) }
     }
 
+    /// Fetches the repos in a group (nil = the ungrouped repos).
+    func fetch(group: RepoGroup.ID?) async {
+        let section = config.sections(for: repos.map(\.path)).first { $0.group?.id == group }
+        let members = section?.repos.compactMap { repo(at: $0) } ?? []
+        await runLimited(members) { await self.fetch($0) }
+    }
+
     /// Fetches, then fast-forwards every clean worktree and every local branch that is strictly behind.
     func pull(_ repo: RepoState) async {
         await fetch(repo)

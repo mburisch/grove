@@ -183,6 +183,8 @@ private struct GroupHeader: View {
             Rectangle().fill(.separator).frame(height: 1)
             if let group {
                 Menu {
+                    Button("Fetch Group") { Task { await model.fetch(group: group.id) } }
+                    Divider()
                     Button("Rename") { model.renamingGroup = group.id }
                     Button("Delete Group") { model.deleteGroup(group.id) }
                 } label: {
@@ -200,6 +202,8 @@ private struct GroupHeader: View {
         .background(targeted ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
         .contextMenu {
+            Button(group == nil ? "Fetch Ungrouped" : "Fetch Group") { Task { await model.fetch(group: group?.id) } }
+            Divider()
             if let group {
                 Button("Rename") { model.renamingGroup = group.id }
                 Button("Delete Group") { model.deleteGroup(group.id) }

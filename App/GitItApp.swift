@@ -24,10 +24,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
-        item.button?.action = #selector(togglePanel)
+        item.button?.action = #selector(statusItemClicked)
+        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         statusItem = item
         updateStatusItem()
         model.start()
+    }
+
+    /// Left click toggles the panel; right click (or Ctrl-click) shows a small menu.
+    @objc private func statusItemClicked() {
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
+            showStatusMenu()
+        } else {
+            togglePanel()
+        }
+    }
+
+    private func showStatusMenu() {
+        guard let button = statusItem?.button else { return }
+        let menu = NSMenu()
+        let fetch = NSMenuItem(title: "Fetch All", action: #selector(fetchAll), keyEquivalent: "")
+        fetch.target = self
+        menu.addItem(fetch)
+        let groups = model.config.groups
+        if !groups.isEmpty {
+            let sections = model.config.sections(for: model.repos.map(\.path))
+            let ungrouped = sections.last { $0.group == nil }?.repos.count ?? 0
+            menu.addItem(.separator())
+            for group in groups {
+                let item = NSMenuItem(title: "Fetch \(group.name)", action: #selector(fetchGroup(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = group.id
+                item.isEnabled = sections.contains { $0.group?.id == group.id && !$0.repos.isEmpty }
+                menu.addItem(item)
+            }
+            if ungrouped > 0 {
+                let item = NSMenuItem(title: "Fetch Ungrouped", action: #selector(fetchGroup(_:)), keyEquivalent: "")
+                item.target = self
+                menu.addItem(item)
+            }
+        }
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Quit GitIt", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+    }
+
+    @objc private func fetchAll() {
+        Task { await model.fetchAll() }
+    }
+
+    @objc private func fetchGroup(_ sender: NSMenuItem) {
+        let group = sender.representedObject as? RepoGroup.ID
+        Task { await model.fetch(group: group) }
     }
 
     @objc private func togglePanel() {
