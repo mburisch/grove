@@ -13,32 +13,49 @@ struct PopoverRoot: View {
                 Banner(text: error, style: .error) { model.configError = nil }
                 Divider()
             }
-            HStack(spacing: 0) {
-                RepoSidebar()
-                    .frame(width: 290)
-                Divider()
-                detail
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if let pane = model.pane, pane.isPage {
+                Page(title: pane == .clone ? "Clone Repository" : "Settings") {
+                    if pane == .clone { CloneView() } else { SettingsView() }
+                }
+            } else {
+                HStack(spacing: 0) {
+                    RepoTree()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Divider()
+                    Inspector()
+                        .frame(width: 380)
+                        .frame(maxHeight: .infinity)
+                }
             }
         }
-        .frame(width: 860, height: 620)
+        .frame(width: 1020, height: 660)
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             // Popover opened: refresh local status if it's a bit stale (local only, no network).
             Task { await model.refreshAll(ifOlderThan: 20) }
         }
     }
+}
 
-    @ViewBuilder private var detail: some View {
-        switch model.pane {
-        case .repo(let path):
-            if let repo = model.repo(at: path) {
-                RepoDetailView(repo: repo).id(path)
-            } else {
-                EmptyDetail()
+/// Full-width page (clone, settings) with a back button.
+private struct Page<Content: View>: View {
+    @Environment(AppModel.self) private var model
+    let title: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button { model.pane = nil } label: { Label("Back", systemImage: "chevron.left") }
+                    .buttonStyle(.borderless)
+                Text(title).font(.headline)
+                Spacer()
             }
-        case .clone: CloneView()
-        case .settings: SettingsView()
-        case nil: EmptyDetail()
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            Divider()
+            content
+                .frame(maxWidth: 640)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
@@ -56,7 +73,7 @@ private struct HeaderBar: View {
 
             TextField("Filter", text: $model.filter)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 180)
+                .frame(width: 200)
 
             if !model.isOnline {
                 Label("Offline", systemImage: "wifi.slash")
@@ -103,48 +120,6 @@ private struct HeaderBar: View {
     }
 }
 
-private struct RepoSidebar: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        let selection = Binding<String?>(
-            get: { if case .repo(let path) = model.pane { path } else { nil } },
-            set: { model.pane = $0.map(Pane.repo) }
-        )
-        if model.repos.isEmpty {
-            VStack(spacing: 8) {
-                Text("No repositories").font(.headline)
-                Text("Add a folder, a scan root in Settings, or clone a GitHub URL.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                Button("Clone…") { model.pane = .clone }
-                Button("Settings") { model.pane = .settings }
-            }
-            .padding()
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            List(model.filteredRepos, selection: selection) { repo in
-                RepoRowView(repo: repo)
-                    .tag(repo.path)
-                    .contextMenu { RepoContextMenu(repo: repo) }
-            }
-            .listStyle(.sidebar)
-        }
-    }
-}
-
-private struct EmptyDetail: View {
-    var body: some View {
-        VStack(spacing: 6) {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.largeTitle)
-                .foregroundStyle(.tertiary)
-            Text("Select a repository").foregroundStyle(.secondary)
-        }
-    }
-}
-
 struct RepoContextMenu: View {
     @Environment(AppModel.self) private var model
     let repo: RepoState
@@ -174,10 +149,7 @@ struct OpenInMenu: View {
                 Button(launcher.name) { model.open(path, with: launcher) }
             }
             Divider()
-            Button("Copy Path") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(path, forType: .string)
-            }
+            Button("Copy Path") { copyToPasteboard(path) }
         }
     }
 }
@@ -235,4 +207,9 @@ struct Banner: View {
         .padding(.vertical, 6)
         .background((style == .error ? Color.red : Color.blue).opacity(0.08))
     }
+}
+
+func copyToPasteboard(_ text: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
 }

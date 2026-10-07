@@ -122,6 +122,42 @@ public struct WorktreeInfo: Sendable, Hashable, Identifiable {
     public var url: URL { URL(fileURLWithPath: path) }
 }
 
+public struct FileChange: Sendable, Hashable, Identifiable {
+    /// One-letter status as git prints it: M, A, D, R, C, T, or "?" for untracked.
+    public var status: String
+    /// Path relative to the worktree root (the new path for renames).
+    public var path: String
+    /// Original path for renames and copies.
+    public var oldPath: String?
+    /// nil for binary and untracked files.
+    public var insertions: Int?
+    public var deletions: Int?
+
+    public init(status: String, path: String, oldPath: String? = nil, insertions: Int? = nil, deletions: Int? = nil) {
+        self.status = status
+        self.path = path
+        self.oldPath = oldPath
+        self.insertions = insertions
+        self.deletions = deletions
+    }
+
+    public var id: String { path }
+    public var isUntracked: Bool { status == "?" }
+    public var isDeleted: Bool { status == "D" }
+}
+
+/// Per-worktree details loaded on demand when a worktree is selected.
+public struct WorktreeDetails: Sendable, Hashable {
+    public var head: CommitSummary?
+    /// Uncommitted changes (staged and unstaged) followed by untracked files.
+    public var uncommitted: [FileChange]
+    /// Commits on HEAD that are not on the primary branch, newest first (capped).
+    public var commitsAhead: [CommitSummary]
+    /// Files that differ between the working tree and the point where HEAD forked from the
+    /// primary branch: committed and uncommitted changes together (untracked files excluded).
+    public var changedSinceBase: [FileChange]
+}
+
 /// A point-in-time read of a repository's state.
 public struct RepoSnapshot: Sendable, Hashable {
     public var remoteName: String?

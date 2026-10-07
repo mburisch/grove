@@ -1,52 +1,6 @@
 import GitItCore
 import SwiftUI
 
-struct RepoRowView: View {
-    let repo: RepoState
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    Text(repo.name).fontWeight(.medium).lineLimit(1)
-                    if let mode = repo.snapshot?.mode, mode != .full {
-                        ModeChip(mode: mode)
-                    }
-                }
-                HStack(spacing: 4) {
-                    if let main = repo.mainWorktree, let branch = main.branch,
-                       branch != repo.snapshot?.primaryBranch {
-                        Text(branch).foregroundStyle(.orange)
-                        Text("·")
-                    }
-                    Text(repo.snapshot?.gitHub?.slug ?? repo.displayPath)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 4)
-            if repo.activity != nil {
-                ProgressView().controlSize(.small)
-            } else if repo.lastError != nil {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red)
-                    .help(repo.lastError ?? "")
-            }
-            if let main = repo.mainWorktree {
-                if main.status.hasTrackedChanges {
-                    Image(systemName: "pencil.circle.fill")
-                        .foregroundStyle(.orange)
-                        .help("Uncommitted changes")
-                }
-                AheadBehindBadge(value: main.tracking ?? main.versusPrimary)
-            }
-        }
-        .padding(.vertical, 2)
-    }
-}
-
 /// "↓3 ↑1" style counts; shows a check when in sync.
 struct AheadBehindBadge: View {
     let value: AheadBehind?

@@ -74,7 +74,8 @@ public struct AppConfig: Codable, Sendable, Hashable {
     public var excluded: [String] = []
     public var repoSettings: [String: RepoSettings] = [:]
     public var cloneRoot: String = "~/src"
-    public var defaultFetchIntervalMinutes: Int = 15
+    /// 0 = automatic fetching off.
+    public var defaultFetchIntervalMinutes: Int = 0
     public var gitPath: String = ""
     public var launchers: [Launcher] = Launcher.defaults
     public var pauseFetchInLowPowerMode: Bool = true

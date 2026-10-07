@@ -3,10 +3,14 @@ import GitItCore
 import Network
 import Observation
 
+/// What the popover shows: a selection in the tree (with the inspector), or a full-width page.
 enum Pane: Hashable {
     case repo(String)
+    case worktree(repo: String, path: String)
     case clone
     case settings
+
+    var isPage: Bool { self == .clone || self == .settings }
 }
 
 @MainActor @Observable
@@ -20,6 +24,10 @@ final class AppModel {
     private(set) var isOnline = true
     var clone = CloneJob()
     var configError: String?
+    /// Repos whose worktrees are collapsed in the tree (expanded by default).
+    var collapsed: Set<String> = []
+    /// Worktree details keyed by worktree path, loaded when a worktree is inspected.
+    private(set) var details: [String: WorktreeDetails] = [:]
 
     @ObservationIgnored private let store = ConfigStore()
     @ObservationIgnored private var scheduler: Task<Void, Never>?
@@ -107,7 +115,11 @@ final class AppModel {
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         let added = newRepos.filter { existing[$0.path] == nil }
         repos = newRepos
-        if case .repo(let path) = pane, repo(at: path) == nil { pane = nil }
+        switch pane {
+        case .repo(let path), .worktree(let path, _):
+            if repo(at: path) == nil { pane = nil }
+        default: break
+        }
         for repo in added { Task { await refresh(repo) } }
     }
 
@@ -120,7 +132,7 @@ final class AppModel {
             if !config.repositories.contains(path) { config.repositories.append(path) }
         }
         await rebuildRepoList()
-        if let last = urls.last, let repo = repo(at: last.standardizedFileURL.path) { pane = .repo(repo.path) }
+        if let last = urls.last, let repo = repo(at: last.standardizedFileURL.path) { select(.repo(repo.path)) }
         if !invalid.isEmpty { configError = "Not a git repository: \(invalid.joined(separator: ", "))" }
     }
 
@@ -143,10 +155,38 @@ final class AppModel {
 
     private func loadSnapshot(_ repo: RepoState) async {
         do {
-            repo.snapshot = try await repository(repo).snapshot()
+            let snapshot = try await repository(repo).snapshot()
+            repo.snapshot = snapshot
             repo.lastRefresh = .now
+            // Keep the inspected worktree's details current.
+            switch pane {
+            case .worktree(let path, let wt) where path == repo.path:
+                await loadDetails(repo, worktreePath: wt)
+            case .repo(let path) where path == repo.path:
+                if let main = snapshot.mainWorktree { await loadDetails(repo, worktreePath: main.path) }
+            default: break
+            }
         } catch {
             repo.lastError = error.localizedDescription
+        }
+    }
+
+    func loadDetails(_ repo: RepoState, worktreePath: String) async {
+        details[worktreePath] = await repository(repo)
+            .worktreeDetails(path: worktreePath, primaryRef: repo.snapshot?.primaryRemoteRef)
+    }
+
+    /// Selects a worktree (or a repo's main checkout) and loads its details.
+    func select(_ pane: Pane) {
+        self.pane = pane
+        switch pane {
+        case .worktree(let path, let wt):
+            if let repo = repo(at: path) { Task { await loadDetails(repo, worktreePath: wt) } }
+        case .repo(let path):
+            if let repo = repo(at: path), let main = repo.mainWorktree {
+                Task { await loadDetails(repo, worktreePath: main.path) }
+            }
+        default: break
         }
     }
 
@@ -278,7 +318,13 @@ final class AppModel {
             do {
                 try await repository(repo).addWorktree(branch: branch, at: destination)
                 repo.lastMessage = "Created worktree \(destination.path.abbreviatingWithTilde)"
+                collapsed.remove(repo.path)
                 if let launcher { open(destination.path, with: launcher) }
+                await loadSnapshot(repo)
+                if let wt = repo.snapshot?.worktrees.first(where: { $0.branch == branch && !$0.isMain }) {
+                    select(.worktree(repo: repo.path, path: wt.path))
+                }
+                return
             } catch {
                 repo.lastError = error.localizedDescription
             }
@@ -333,6 +379,20 @@ final class AppModel {
             return true
         }
     }
+
+    /// Launchers that can open a single file. Terminals are excluded (Terminal "opening" a script
+    /// runs it) and so is Finder (files get "Reveal in Finder" instead).
+    var fileLaunchers: [Launcher] {
+        availableLaunchers.filter { launcher in
+            if case .app(let bundleID) = launcher.kind { return !Self.nonEditorBundleIDs.contains(bundleID) }
+            return true
+        }
+    }
+
+    private static let nonEditorBundleIDs: Set<String> = [
+        "com.apple.Terminal", "com.googlecode.iterm2", "com.mitchellh.ghostty",
+        "dev.warp.Warp-Stable", "net.kovidgoyal.kitty", "com.github.wez.wezterm", "com.apple.finder",
+    ]
 
     func open(_ path: String, with launcher: Launcher) {
         let url = URL(fileURLWithPath: path)

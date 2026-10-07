@@ -4,34 +4,144 @@ import SwiftUI
 
 @main
 struct GitItApp: App {
-    @State private var model = AppModel()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        MenuBarExtra {
-            PopoverRoot()
-                .environment(model)
-        } label: {
-            MenuBarLabel(model: model)
-                .task { model.start() }
-        }
-        .menuBarExtraStyle(.window)
+        // The UI lives in a status item + panel owned by AppDelegate; SwiftUI needs at least one scene.
+        Settings { EmptyView() }
     }
 }
 
-private struct MenuBarLabel: View {
-    let model: AppModel
+/// Owns the menu bar item and the panel. A `MenuBarExtra` window is always anchored under its
+/// icon and can run off-screen at this size, so the panel is managed by hand and centered instead.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let model = AppModel()
+    private var statusItem: NSStatusItem?
+    private var panel: MainPanel?
+    private var outsideClickMonitor: Any?
 
-    var body: some View {
-        if model.hasErrors {
-            Image(systemName: "exclamationmark.triangle")
-        } else if model.behindTotal > 0 {
-            HStack(spacing: 2) {
-                Image(systemName: "arrow.triangle.branch")
-                Text("\(model.behindTotal)")
-            }
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.target = self
+        item.button?.action = #selector(togglePanel)
+        statusItem = item
+        updateStatusItem()
+        model.start()
+    }
+
+    @objc private func togglePanel() {
+        if let panel, panel.isVisible {
+            hidePanel()
         } else {
-            Image(systemName: "arrow.triangle.branch")
+            showPanel()
         }
+    }
+
+    private func showPanel() {
+        let panel = self.panel ?? makePanel()
+        self.panel = panel
+        // Center on the screen that holds the menu bar icon (falls back to the main screen).
+        let screen = statusItem?.button?.window?.screen ?? NSScreen.main
+        if let visible = screen?.visibleFrame {
+            let size = panel.frame.size
+            panel.setFrameOrigin(NSPoint(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2))
+        }
+        NSApp.activate()
+        panel.makeKeyAndOrderFront(nil)
+        startOutsideClickMonitor()
+    }
+
+    private func hidePanel() {
+        panel?.orderOut(nil)
+        if let monitor = outsideClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            outsideClickMonitor = nil
+        }
+    }
+
+    /// Clicks in other apps (or on the desktop) close the panel. Global monitors only see events
+    /// sent to other applications, so clicks inside our own windows never trigger this.
+    private func startOutsideClickMonitor() {
+        guard outsideClickMonitor == nil else { return }
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+            MainActor.assumeIsolated { self?.hideUnlessBusy() }
+        }
+    }
+
+    /// Hides the panel unless a modal (folder picker) or sheet launched from it is up.
+    private func hideUnlessBusy() {
+        guard let panel, panel.isVisible, NSApp.modalWindow == nil, panel.attachedSheet == nil,
+              !(NSApp.keyWindow is NSOpenPanel) else { return }
+        hidePanel()
+    }
+
+    private func makePanel() -> MainPanel {
+        let host = NSHostingController(rootView: PopoverRoot().environment(model))
+        let panel = MainPanel(contentViewController: host)
+        panel.styleMask = [.titled, .fullSizeContentView, .closable]
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.isMovableByWindowBackground = true
+        panel.level = .floating
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            panel.standardWindowButton(button)?.isHidden = true
+        }
+        // Also hide when focus moves elsewhere (e.g. Cmd-Tab), like a popover.
+        let observed: [(Notification.Name, AnyObject?)] = [
+            (NSWindow.didResignKeyNotification, panel),
+            (NSApplication.didResignActiveNotification, nil),
+        ]
+        for (name, object) in observed {
+            NotificationCenter.default.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
+                // Deferred so a folder picker opened from the panel is already key when we check.
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self, let panel = self.panel, !panel.isKeyWindow || !NSApp.isActive else { return }
+                        self.hideUnlessBusy()
+                    }
+                }
+            }
+        }
+        panel.onClose = { [weak self] in self?.hidePanel() }
+        return panel
+    }
+
+    /// Menu bar icon: a warning on errors, otherwise the branch symbol with the count of repos behind.
+    private func updateStatusItem() {
+        withObservationTracking {
+            guard let button = statusItem?.button else { return }
+            let symbol = model.hasErrors ? "exclamationmark.triangle" : "arrow.triangle.branch"
+            let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "GitIt")
+            image?.isTemplate = true
+            button.image = image
+            let behind = model.behindTotal
+            button.title = behind > 0 && !model.hasErrors ? " \(behind)" : ""
+            button.imagePosition = .imageLeading
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.updateStatusItem() }
+        }
+    }
+}
+
+/// Floating panel that can become key (for text fields) and closes on Esc.
+final class MainPanel: NSPanel {
+    var onClose: (() -> Void)?
+
+    convenience init(contentViewController: NSViewController) {
+        self.init(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
+        self.contentViewController = contentViewController
+        setContentSize(contentViewController.view.fittingSize)
+    }
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
+    override func cancelOperation(_ sender: Any?) {
+        onClose?()
     }
 }
 

@@ -118,6 +118,18 @@ struct RepositoryTests {
         #expect(branch.worktreePath == wtPath.path)
         #expect(snap.remoteBranches.map(\.name).sorted() == ["feature", "main"])
 
+        try "edit".write(to: wtPath.appendingPathComponent("file1.txt"), atomically: true, encoding: .utf8)
+        try "new".write(to: wtPath.appendingPathComponent("scratch.txt"), atomically: true, encoding: .utf8)
+        let details = await repo.worktreeDetails(path: wtPath.path, primaryRef: snap.primaryRemoteRef)
+        #expect(details.head?.subject == "change f.txt")
+        #expect(details.uncommitted.map(\.path) == ["file1.txt", "scratch.txt"])
+        #expect(details.uncommitted.map(\.status) == ["M", "?"])
+        #expect(details.commitsAhead.count == 2)
+        // The published feature commit, the local f.txt commit, and the uncommitted edit to file1.txt.
+        let sinceBase = details.changedSinceBase.map(\.path)
+        #expect(sinceBase.count == 3)
+        #expect(sinceBase.contains("f.txt") && sinceBase.contains("file1.txt"))
+        #expect(details.changedSinceBase.allSatisfy { $0.status != "?" })
     }
 
     @Test func fastForwardBranchWithoutWorktree() async throws {

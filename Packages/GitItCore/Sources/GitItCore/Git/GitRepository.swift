@@ -197,6 +197,47 @@ public struct GitRepository: Sendable {
         }
     }
 
+    /// Changed files and commits for one worktree. `primaryRef` is e.g. `origin/main`.
+    public func worktreeDetails(path: String, primaryRef: String?, maxCommits: Int = 50) async -> WorktreeDetails {
+        let wt = URL(fileURLWithPath: path)
+        async let head = git.outputIfSuccess(["log", "-1", "--format=\(GitParsers.logFormat)", "HEAD"], in: wt)
+        async let uncommitted = fileChanges(against: "HEAD", in: wt)
+        async let untracked = git.outputIfSuccess(["ls-files", "--others", "--exclude-standard", "-z"], in: wt)
+        async let ahead = outputIf(primaryRef.map {
+            ["log", "-n", String(maxCommits), "--format=\(GitParsers.logFormat)", "\($0)..HEAD"]
+        }, in: wt)
+        async let sinceBase = changesSinceBase(primaryRef: primaryRef, in: wt)
+
+        let untrackedFiles = (await untracked ?? "").split(separator: "\0").map {
+            FileChange(status: "?", path: String($0))
+        }
+        return WorktreeDetails(
+            head: GitParsers.parseLog(await head ?? "").first,
+            uncommitted: await uncommitted + untrackedFiles,
+            commitsAhead: GitParsers.parseLog(await ahead ?? ""),
+            changedSinceBase: await sinceBase
+        )
+    }
+
+    /// Working tree vs the merge base of HEAD and the primary branch.
+    private func changesSinceBase(primaryRef: String?, in wt: URL) async -> [FileChange] {
+        guard let primaryRef,
+              let base = await git.outputIfSuccess(["merge-base", "HEAD", primaryRef], in: wt) else { return [] }
+        return await fileChanges(against: base, in: wt)
+    }
+
+    /// Working tree (including staged changes) vs `rev`.
+    private func fileChanges(against rev: String, in wt: URL) async -> [FileChange] {
+        async let numstat = git.outputIfSuccess(["diff", "--numstat", "-z", "-M", rev], in: wt)
+        async let nameStatus = git.outputIfSuccess(["diff", "--name-status", "-z", "-M", rev], in: wt)
+        return GitParsers.parseFileChanges(numstat: await numstat ?? "", nameStatus: await nameStatus ?? "")
+    }
+
+    private func outputIf(_ arguments: [String]?, in directory: URL) async -> String? {
+        guard let arguments else { return nil }
+        return await git.outputIfSuccess(arguments, in: directory)
+    }
+
     public func commonGitDirectory() async -> URL? {
         guard let path = await git.outputIfSuccess(["rev-parse", "--path-format=absolute", "--git-common-dir"], in: url) else {
             return nil

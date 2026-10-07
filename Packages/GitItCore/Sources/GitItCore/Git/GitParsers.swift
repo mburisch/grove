@@ -159,6 +159,68 @@ public enum GitParsers {
         return stat
     }
 
+    // MARK: diff --numstat / log
+
+    /// Parses `git diff --numstat -z`: `ins<TAB>del<TAB>path<NUL>`, or for renames
+    /// `ins<TAB>del<TAB><NUL>old<NUL>new<NUL>`. Binary files report `-` counts.
+    /// Returns counts keyed by (new) path, with the old path for renames.
+    public static func parseNumstat(_ output: String) -> [(path: String, oldPath: String?, insertions: Int?, deletions: Int?)] {
+        var result: [(path: String, oldPath: String?, insertions: Int?, deletions: Int?)] = []
+        var fields = output.split(separator: "\0", omittingEmptySubsequences: false).map(String.init)[...]
+        while let record = fields.popFirst() {
+            let parts = record.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
+            guard parts.count == 3 else { continue }
+            var path = String(parts[2])
+            var oldPath: String?
+            if path.isEmpty, let old = fields.popFirst(), let new = fields.popFirst() {
+                oldPath = old
+                path = new
+            }
+            result.append((path, oldPath, Int(parts[0]), Int(parts[1])))
+        }
+        return result
+    }
+
+    /// Parses `git diff --name-status -z`: `X<NUL>path<NUL>`, or `R100<NUL>old<NUL>new<NUL>` for renames/copies.
+    /// Returns the one-letter status keyed by (new) path.
+    public static func parseNameStatus(_ output: String) -> [String: String] {
+        var result: [String: String] = [:]
+        var fields = output.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)[...]
+        while let code = fields.popFirst(), let letter = code.first {
+            if letter == "R" || letter == "C" {
+                _ = fields.popFirst()
+            }
+            guard let path = fields.popFirst() else { break }
+            result[path] = String(letter)
+        }
+        return result
+    }
+
+    /// Combines `--numstat -z` and `--name-status -z` output for the same diff.
+    public static func parseFileChanges(numstat: String, nameStatus: String) -> [FileChange] {
+        let statuses = parseNameStatus(nameStatus)
+        return parseNumstat(numstat).map { entry in
+            FileChange(
+                status: statuses[entry.path] ?? (entry.oldPath == nil ? "M" : "R"),
+                path: entry.path,
+                oldPath: entry.oldPath,
+                insertions: entry.insertions,
+                deletions: entry.deletions
+            )
+        }
+    }
+
+    /// Format for `git log` parsed by `parseLog`.
+    public static let logFormat = "%H%x00%s%x00%an%x00%ct"
+
+    public static func parseLog(_ output: String) -> [CommitSummary] {
+        output.split(separator: "\n").compactMap { line in
+            let f = line.split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
+            guard f.count == 4 else { return nil }
+            return CommitSummary(sha: f[0], subject: f[1], author: f[2], date: Date(timeIntervalSince1970: TimeInterval(f[3]) ?? 0))
+        }
+    }
+
     // MARK: clone/fetch progress
 
     public struct Progress: Sendable, Hashable {

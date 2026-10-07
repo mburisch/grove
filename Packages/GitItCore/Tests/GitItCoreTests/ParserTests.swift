@@ -84,6 +84,25 @@ struct ParserTests {
         #expect(GitParsers.parseShortStat("") == .zero)
     }
 
+    @Test func fileChanges() {
+        let numstat = "3\t1\tsrc/a.swift\0-\t-\timg.png\0" + "2\t0\t\0old.txt\0new.txt\0" + "0\t4\tgone.txt\0"
+        let nameStatus = "M\0src/a.swift\0A\0img.png\0R087\0old.txt\0new.txt\0D\0gone.txt\0"
+        let changes = GitParsers.parseFileChanges(numstat: numstat, nameStatus: nameStatus)
+        #expect(changes.map(\.path) == ["src/a.swift", "img.png", "new.txt", "gone.txt"])
+        #expect(changes.map(\.status) == ["M", "A", "R", "D"])
+        #expect(changes[0].insertions == 3 && changes[0].deletions == 1)
+        #expect(changes[1].insertions == nil)
+        #expect(changes[2].oldPath == "old.txt")
+        #expect(changes[3].isDeleted)
+        #expect(GitParsers.parseFileChanges(numstat: "", nameStatus: "").isEmpty)
+    }
+
+    @Test func log() {
+        let commits = GitParsers.parseLog("abc\0Fix bug\0Ann\01700000000\ndef\0Other\0Bob\01700000001\n")
+        #expect(commits.map(\.subject) == ["Fix bug", "Other"])
+        #expect(commits[1].author == "Bob")
+    }
+
     @Test func progress() {
         let p = GitParsers.parseProgress("Receiving objects:  50% (5/10), 1.00 MiB | 2 MiB/s")
         #expect(p?.phase == "Receiving objects")
