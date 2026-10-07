@@ -367,33 +367,19 @@ public struct GitRepository: Sendable {
             _ = try? await git.run(["remote", "set-head", remote, "--auto"], in: url)
 
         case .blobless:
-            if current.mode == .shallow {
-                try await git.run(["config", "--replace-all", "remote.\(remote).fetch", wildcardRefspec], in: url)
-            }
-            // Pack loose objects while this is still a regular clone: once the promisor config is set,
-            // repack treats objects referenced by promisor packs as promisor objects and leaves loose
-            // copies alone, and a filtered repack only drops objects that are packed.
-            try await git.run(["repack", "-a", "-d", "-q"], in: url, timeout: long)
             try await git.run(["config", "core.repositoryformatversion", "1"], in: url)
             try await git.run(["config", "extensions.partialclone", remote], in: url)
             try await git.run(["config", "remote.\(remote).promisor", "true"], in: url)
             try await git.run(["config", "remote.\(remote).partialclonefilter", "blob:none"], in: url)
-            var args = ["fetch", "--prune", "--no-progress", "--refetch", "--filter=blob:none"]
-            if current.mode == .shallow { args.append("--unshallow") }
-            try await git.run(args + [remote], in: url, timeout: long)
-            _ = try? await git.run(["remote", "set-head", remote, "--auto"], in: url)
-            // Drop blobs the remote can serve again; blobs used by checked-out files are kept.
-            // `repack --filter` writes the filtered-out objects to a separate pack, so direct that
-            // pack to a scratch directory and delete it.
-            try await expireReflogs()
-            let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("gitit-filter-\(UUID().uuidString)")
-            try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: scratch) }
-            try await git.run(
-                ["repack", "-a", "-d", "-q", "--filter=blob:none", "--filter-to=\(scratch.appendingPathComponent("pack").path)"],
-                in: url, timeout: long
-            )
-            _ = try? await git.run(["prune", "--expire=now"], in: url, timeout: long)
+            if current.mode == .shallow {
+                try await git.run(["config", "--replace-all", "remote.\(remote).fetch", wildcardRefspec], in: url)
+                try await git.run(["fetch", "--prune", "--no-progress", "--unshallow", "--filter=blob:none", remote], in: url, timeout: long)
+                _ = try? await git.run(["remote", "set-head", remote, "--auto"], in: url)
+            }
+            // Filter locally instead of refetching: a fetch into a partial clone moves local objects
+            // referenced by the fetched ones into a promisor pack (which repack never filters), and
+            // how many history blobs that sweeps up varies from run to run.
+            try await dropBlobsExceptCheckedOut()
 
         case .shallow:
             let snapshot = try await snapshot(maxComparisons: 0)
@@ -437,6 +423,63 @@ public struct GitRepository: Sendable {
             try await expireReflogs()
             try await git.run(["gc", "--prune=now", "--quiet"], in: url, timeout: long)
         }
+    }
+
+    /// Removes all blobs except those in the worktrees' indexes (the checked-out and staged files)
+    /// and marks the remaining packs as promisor packs, so missing blobs are fetched on demand.
+    /// Requires the partial clone config to be set already.
+    private func dropBlobsExceptCheckedOut() async throws {
+        guard let gitDir = await commonGitDirectory() else {
+            throw GitError(arguments: ["rev-parse", "--git-common-dir"], exitCode: 1, stderr: "git directory not found")
+        }
+        let packDir = gitDir.appendingPathComponent("objects/pack")
+        let long: Duration = .seconds(3600)
+
+        // Collect blob ids from every worktree's index (gitlinks are commits in other repos).
+        let worktrees = GitParsers.parseWorktrees(try await git.output(["worktree", "list", "--porcelain"], in: url))
+            .filter { !$0.isBare && !$0.isPrunable }
+        var blobs = Set<String>()
+        for wt in worktrees {
+            let staged = try await git.run(["ls-files", "--stage", "-z"], in: URL(fileURLWithPath: wt.path)).stdout
+            for entry in staged.split(separator: "\0") {
+                let fields = entry.split(separator: " ", maxSplits: 2)
+                if fields.count == 3, fields[0] != "160000" { blobs.insert(String(fields[1])) }
+            }
+        }
+
+        // Pack them separately and protect that pack with .keep while the rest is filtered.
+        try await git.run(["repack", "-a", "-d", "-q"], in: url, timeout: long)
+        var keep: URL?
+        if !blobs.isEmpty {
+            let name = try await git.run(
+                ["pack-objects", "-q", packDir.appendingPathComponent("pack").path],
+                in: url, timeout: long, input: Data(blobs.sorted().joined(separator: "\n").utf8)
+            ).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            keep = packDir.appendingPathComponent("pack-\(name).keep")
+            FileManager.default.createFile(atPath: keep!.path, contents: nil)
+        }
+        defer { if let keep { try? FileManager.default.removeItem(at: keep) } }
+
+        try await expireReflogs()
+        // `repack --filter` writes the filtered-out objects to a separate pack; send it to a scratch
+        // directory and delete it.
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("gitit-filter-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        try await git.run(
+            ["repack", "-a", "-d", "-q", "--filter=blob:none", "--filter-to=\(scratch.appendingPathComponent("pack").path)"],
+            in: url, timeout: long
+        )
+
+        // Every remaining object now counts as coming from the promisor remote, which is what lets
+        // the missing blobs be absent.
+        for file in try FileManager.default.contentsOfDirectory(atPath: packDir.path) where file.hasSuffix(".pack") {
+            let marker = packDir.appendingPathComponent(String(file.dropLast(".pack".count)) + ".promisor")
+            if !FileManager.default.fileExists(atPath: marker.path) {
+                FileManager.default.createFile(atPath: marker.path, contents: nil)
+            }
+        }
+        _ = try? await git.run(["prune", "--expire=now"], in: url, timeout: long)
     }
 
     private func expireReflogs() async throws {

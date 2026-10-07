@@ -60,6 +60,7 @@ public struct GitRunner: Sendable {
         in directory: URL? = nil,
         timeout: Duration = .seconds(300),
         check: Bool = true,
+        input: Data? = nil,
         onStderr: (@Sendable (String) -> Void)? = nil
     ) async throws -> GitResult {
         let process = Process()
@@ -72,7 +73,8 @@ public struct GitRunner: Sendable {
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
-        process.standardInput = FileHandle.nullDevice
+        let stdinPipe = input.map { _ in Pipe() }
+        process.standardInput = stdinPipe ?? FileHandle.nullDevice
 
         let stdoutBuffer = DataBuffer()
         let stderrBuffer = DataBuffer()
@@ -99,6 +101,13 @@ public struct GitRunner: Sendable {
                     process.terminationHandler = nil
                     continuation.resume(throwing: error)
                     return
+                }
+                if let stdinPipe, let input {
+                    // Written off the caller's thread so a large input can't block on a full pipe.
+                    Task.detached {
+                        try? stdinPipe.fileHandleForWriting.write(contentsOf: input)
+                        try? stdinPipe.fileHandleForWriting.close()
+                    }
                 }
                 let pid = process
                 Task.detached {

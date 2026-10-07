@@ -239,6 +239,9 @@ struct RepositoryTests {
         #expect(snap.mode == .blobless)
         #expect(try await commitCount() == "7")
         #expect(try await !hasObject(oldBlob), "historical blobs are dropped")
+        #expect(try await hasObject("HEAD:file1.txt"), "checked-out blobs are kept")
+        let fsck = try await sb.git.run(["fsck", "--connectivity-only", "--no-dangling"], in: repo.url, check: false)
+        #expect(fsck.exitCode == 0, "\(fsck.stderr)")
         // Status still works; checked-out files are present.
         #expect(snap.mainWorktree?.status.isClean == true)
 
