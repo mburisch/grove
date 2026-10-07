@@ -79,6 +79,10 @@ public struct AppConfig: Codable, Sendable, Hashable {
     public var gitPath: String = ""
     public var launchers: [Launcher] = Launcher.defaults
     public var pauseFetchInLowPowerMode: Bool = true
+    /// Repo list sections, in order.
+    public var groups: [RepoGroup] = []
+    /// Custom order of repos not in any group; unlisted repos follow by name.
+    public var ungroupedOrder: [String] = []
 
     public init() {}
 
@@ -95,6 +99,8 @@ public struct AppConfig: Codable, Sendable, Hashable {
         gitPath = try c.decodeIfPresent(String.self, forKey: .gitPath) ?? d.gitPath
         launchers = try c.decodeIfPresent([Launcher].self, forKey: .launchers) ?? d.launchers
         pauseFetchInLowPowerMode = try c.decodeIfPresent(Bool.self, forKey: .pauseFetchInLowPowerMode) ?? d.pauseFetchInLowPowerMode
+        groups = try c.decodeIfPresent([RepoGroup].self, forKey: .groups) ?? d.groups
+        ungroupedOrder = try c.decodeIfPresent([String].self, forKey: .ungroupedOrder) ?? d.ungroupedOrder
     }
 
     public func settings(for path: String) -> RepoSettings {

@@ -61,6 +61,56 @@ final class AppModel {
         }
     }
 
+    /// List sections (groups, then ungrouped) with the repos matching the filter.
+    /// While filtering, sections without matches are hidden.
+    var repoSections: [(group: RepoGroup?, repos: [RepoState])] {
+        let visible = Dictionary(filteredRepos.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
+        let filtering = !filter.trimmingCharacters(in: .whitespaces).isEmpty
+        return config.sections(for: repos.map(\.path)).compactMap { section in
+            let members = section.repos.compactMap { visible[$0] }
+            if filtering && members.isEmpty { return nil }
+            return (section.group, members)
+        }
+    }
+
+    /// Group being renamed inline in the list.
+    var renamingGroup: RepoGroup.ID?
+
+    // MARK: - Groups
+
+    @discardableResult
+    func addGroup(named name: String = "New Group", with repo: RepoState? = nil) -> RepoGroup.ID {
+        let group = RepoGroup(name: name)
+        config.groups.append(group)
+        if let repo { moveRepo(repo.path, to: group.id) }
+        renamingGroup = group.id
+        return group.id
+    }
+
+    func renameGroup(_ id: RepoGroup.ID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty, let i = config.groups.firstIndex(where: { $0.id == id }) {
+            config.groups[i].name = trimmed
+        }
+        if renamingGroup == id { renamingGroup = nil }
+    }
+
+    func deleteGroup(_ id: RepoGroup.ID) {
+        config.deleteGroup(id)
+    }
+
+    func toggleGroup(_ id: RepoGroup.ID) {
+        if let i = config.groups.firstIndex(where: { $0.id == id }) { config.groups[i].collapsed.toggle() }
+    }
+
+    func moveRepo(_ path: String, to group: RepoGroup.ID?, before: String? = nil) {
+        config.move(repo: path, to: group, before: before, allPaths: repos.map(\.path))
+    }
+
+    func moveGroup(_ id: RepoGroup.ID, before: RepoGroup.ID?) {
+        config.move(group: id, before: before)
+    }
+
     /// Repos needing attention, for the menu bar badge.
     var behindTotal: Int { repos.filter { $0.behindCount > 0 }.count }
     var hasErrors: Bool { repos.contains { $0.lastError != nil } }
@@ -142,6 +192,7 @@ final class AppModel {
         let isScanned = config.scanRoots.contains { repo.path.hasPrefix($0.path.expandingTilde + "/") }
         if isScanned, !config.excluded.contains(repo.path) { config.excluded.append(repo.path) }
         config.repoSettings[repo.path] = nil
+        config.forgetOrdering(of: repo.path)
         await rebuildRepoList()
     }
 

@@ -97,6 +97,8 @@ private struct HeaderBar: View {
                     let urls = Panels.chooseFolders(multiple: true, prompt: "Add")
                     if !urls.isEmpty { Task { await model.addRepositories(urls) } }
                 }
+                Button("New Group") { model.addGroup() }
+                Divider()
                 Button("Rescan Folders") { Task { await model.rebuildRepoList() } }
             } label: {
                 Image(systemName: "plus")
@@ -133,8 +135,34 @@ struct RepoContextMenu: View {
             Button("Open on GitHub") { NSWorkspace.shared.open(gh.webURL) }
         }
         ConvertMenu(repo: repo)
+        MoveToGroupMenu(repo: repo)
         Divider()
         Button("Remove from List") { Task { await model.remove(repo) } }
+    }
+}
+
+struct MoveToGroupMenu: View {
+    @Environment(AppModel.self) private var model
+    let repo: RepoState
+
+    var body: some View {
+        let current = model.config.groups.first { $0.repos.contains(repo.path) }?.id
+        Menu("Move to Group") {
+            ForEach(model.config.groups) { group in
+                Button {
+                    model.moveRepo(repo.path, to: group.id)
+                } label: {
+                    if group.id == current { Label(group.name, systemImage: "checkmark") } else { Text(group.name) }
+                }
+                .disabled(group.id == current)
+            }
+            if !model.config.groups.isEmpty {
+                Button("Ungrouped") { model.moveRepo(repo.path, to: nil) }
+                    .disabled(current == nil)
+                Divider()
+            }
+            Button("New Group…") { model.addGroup(with: repo) }
+        }
     }
 }
 
