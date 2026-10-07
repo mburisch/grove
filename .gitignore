@@ -6,4 +6,5 @@ DerivedData/
 build/
 xcuserdata/
 dist/
-.claude/
+.claude/settings.local.json
+.claude/worktrees/
