@@ -120,7 +120,7 @@ struct RepositoryTests {
 
         try "edit".write(to: wtPath.appendingPathComponent("file1.txt"), atomically: true, encoding: .utf8)
         try "new".write(to: wtPath.appendingPathComponent("scratch.txt"), atomically: true, encoding: .utf8)
-        let details = await repo.worktreeDetails(path: wtPath.path, primaryRef: snap.primaryRemoteRef)
+        let details = await repo.worktreeDetails(path: wtPath.path, primaryRef: snap.baseRef)
         #expect(details.head?.subject == "change f.txt")
         #expect(details.uncommitted.map(\.path) == ["file1.txt", "scratch.txt"])
         #expect(details.uncommitted.map(\.status) == ["M", "?"])
@@ -130,6 +130,27 @@ struct RepositoryTests {
         #expect(sinceBase.count == 3)
         #expect(sinceBase.contains("f.txt") && sinceBase.contains("file1.txt"))
         #expect(details.changedSinceBase.allSatisfy { $0.status != "?" })
+    }
+
+    @Test func repoWithoutRemoteComparesToLocalMain() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        let dir = sb.root.appendingPathComponent("local")
+        try await sb.git.run(["init", "-q", "-b", "main", dir.path])
+        try await sb.commit(in: dir, file: "a.txt", content: "a")
+        let repo = GitRepository(url: dir, git: sb.git)
+        let wtPath = sb.root.appendingPathComponent("local-topic")
+        try await sb.git.run(["worktree", "add", "-q", "-b", "topic", wtPath.path], in: dir)
+        try await sb.commit(in: wtPath, file: "b.txt", content: "b")
+
+        let snap = try await repo.snapshot()
+        #expect(snap.remoteName == nil)
+        #expect(snap.primaryBranch == "main")
+        #expect(snap.baseRef == "main")
+        let wt = try #require(snap.worktrees.first { $0.branch == "topic" })
+        #expect(wt.versusPrimary == AheadBehind(ahead: 1, behind: 0))
+        let details = await repo.worktreeDetails(path: wtPath.path, primaryRef: snap.baseRef)
+        #expect(details.changedSinceBase.map(\.path) == ["b.txt"])
     }
 
     @Test func fastForwardBranchWithoutWorktree() async throws {

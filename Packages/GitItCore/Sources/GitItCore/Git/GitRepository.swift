@@ -34,7 +34,9 @@ public struct GitRepository: Sendable {
         let mode = await checkoutMode(remote: remoteName)
         let primaryRef = remoteName.flatMap { r in primary.map { "\(r)/\($0)" } }
         let hasPrimaryRef = primaryRef.map { p in refs.contains { $0.refname == "refs/remotes/\(p)" } } ?? false
-        let compareTarget = hasPrimaryRef ? primaryRef : nil
+        // Compare against the remote primary branch, or the local one when there is no remote copy.
+        let hasLocalPrimary = primary.map { p in refs.contains { $0.refname == "refs/heads/\(p)" } } ?? false
+        let compareTarget = hasPrimaryRef ? primaryRef : (hasLocalPrimary ? primary : nil)
 
         // Worktrees, each with status and diff stats.
         let worktreeRecords = GitParsers.parseWorktrees(
@@ -97,6 +99,7 @@ public struct GitRepository: Sendable {
             remoteName: remoteName,
             remoteURL: remoteURL,
             primaryBranch: primary,
+            baseRef: compareTarget,
             mode: mode.mode,
             partialCloneFilter: mode.filter,
             worktrees: worktrees,
@@ -125,6 +128,10 @@ public struct GitRepository: Sendable {
         let remoteRefs = refs.filter { $0.refname.hasPrefix("refs/remotes/") && !$0.isSymref }
         if remoteRefs.count == 1, let only = remoteRefs.first?.refname.split(separator: "/").last {
             return String(only)
+        }
+        // No usable remote: fall back to a conventional local branch.
+        for candidate in ["main", "master", "trunk", "develop"] where names.contains("refs/heads/\(candidate)") {
+            return candidate
         }
         return nil
     }

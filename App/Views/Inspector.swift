@@ -76,7 +76,7 @@ private struct RepoInspector: View {
                 }
                 GridRow {
                     Text("Primary").foregroundStyle(.secondary)
-                    Text(repo.snapshot?.primaryRemoteRef ?? "unknown")
+                    Text(repo.snapshot?.baseRef ?? "none")
                 }
                 GridRow {
                     Text("Fetched").foregroundStyle(.secondary)
@@ -103,7 +103,7 @@ private struct RepoInspector: View {
                 Divider()
                 SectionTitle("Main Checkout")
                 WorktreeSummary(repo: repo, worktree: main)
-                WorktreeChanges(worktree: main, details: model.details[main.path], primary: repo.snapshot?.primaryRemoteRef)
+                WorktreeChanges(worktree: main, details: model.details[main.path], primary: repo.snapshot?.baseRef)
             }
 
             if let snapshot = repo.snapshot {
@@ -178,7 +178,7 @@ private struct WorktreeInspector: View {
             }
             RepoBanners(repo: repo)
             WorktreeSummary(repo: repo, worktree: worktree)
-            WorktreeChanges(worktree: worktree, details: model.details[worktree.path], primary: repo.snapshot?.primaryRemoteRef)
+            WorktreeChanges(worktree: worktree, details: model.details[worktree.path], primary: repo.snapshot?.baseRef)
         }
     }
 }
@@ -190,7 +190,7 @@ private struct WorktreeSummary: View {
     let worktree: WorktreeInfo
 
     var body: some View {
-        let primary = repo.snapshot?.primaryRemoteRef
+        let primary = repo.snapshot?.baseRef
         VStack(alignment: .leading, spacing: 10) {
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 6) {
                 GridRow {
@@ -304,6 +304,12 @@ private struct WorktreeChanges: View {
                         FileTable(root: worktree.path, files: details.uncommitted)
                     }
                 }
+                if primary == nil {
+                    VStack(alignment: .leading, spacing: 4) {
+                        SectionTitle("Changed vs Base Branch")
+                        EmptyNote("Nothing to compare against: no remote primary branch and no local main/master")
+                    }
+                }
                 if let primary {
                     VStack(alignment: .leading, spacing: 4) {
                         FileListHeader(title: "Changed vs \(primary)", files: details.changedSinceBase)
@@ -364,14 +370,15 @@ private struct FileListHeader: View {
                     Text("−\(del)").foregroundStyle(.red).frame(width: FileTable.numberWidth, alignment: .trailing)
                 }
                 .font(.caption.monospacedDigit().weight(.semibold))
-                .padding(.trailing, 4)
+                // Row padding (4) + open-button column (16) + spacing (6).
+                .padding(.trailing, 26)
             }
         }
     }
 }
 
-/// Files as a table: status, path, +lines, −lines. Click opens in the first editor;
-/// the context menu offers the other editors.
+/// Files as a table: status, path, +lines, −lines, open button (shown on hover).
+/// The context menu offers every editor.
 private struct FileTable: View {
     static let numberWidth: CGFloat = 46
     let root: String
@@ -430,6 +437,17 @@ private struct FileRow: View {
                         .frame(width: FileTable.numberWidth * 2, alignment: .trailing)
                 }
             }
+            // Space is always reserved so the number columns stay aligned.
+            Button {
+                if let first = editors.first { model.open(absolutePath, with: first) }
+            } label: {
+                Image(systemName: "arrow.up.forward.square")
+            }
+            .buttonStyle(.borderless)
+            .help(editors.first.map { "Open in \($0.name)" } ?? "")
+            .opacity(hovering && !file.isDeleted && !editors.isEmpty ? 1 : 0)
+            .disabled(file.isDeleted || editors.isEmpty)
+            .frame(width: 16)
         }
         .font(.caption.monospacedDigit())
         .padding(.vertical, 3)
@@ -437,11 +455,7 @@ private struct FileRow: View {
         .background(hovering && !file.isDeleted ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 4))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .onTapGesture {
-            guard !file.isDeleted, let first = editors.first else { return }
-            model.open(absolutePath, with: first)
-        }
-        .help(helpText(editors.first))
+        .help(helpText)
         .contextMenu {
             ForEach(editors) { editor in
                 Button("Open in \(editor.name)") { model.open(absolutePath, with: editor) }
@@ -466,10 +480,9 @@ private struct FileRow: View {
         }
     }
 
-    private func helpText(_ editor: Launcher?) -> String {
-        var text = file.oldPath.map { "\($0) → \(file.path)" } ?? file.path
-        if file.isDeleted { text += " (deleted)" } else if let editor { text += "\nClick to open in \(editor.name)" }
-        return text
+    private var helpText: String {
+        let text = file.oldPath.map { "\($0) → \(file.path)" } ?? file.path
+        return file.isDeleted ? text + " (deleted)" : text
     }
 }
 
@@ -584,7 +597,7 @@ private struct RemoteBranchRow: View {
                     Text(branch.name).fontWeight(.medium).lineLimit(1)
                     if let versus = branch.versusPrimary {
                         AheadBehindBadge(value: versus, showSynced: false)
-                            .help("vs \(repo.snapshot?.primaryRemoteRef ?? "primary")")
+                            .help("vs \(repo.snapshot?.baseRef ?? "primary")")
                     }
                 }
                 CommitLine(commit: branch.commit)

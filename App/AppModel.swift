@@ -173,7 +173,7 @@ final class AppModel {
 
     func loadDetails(_ repo: RepoState, worktreePath: String) async {
         details[worktreePath] = await repository(repo)
-            .worktreeDetails(path: worktreePath, primaryRef: repo.snapshot?.primaryRemoteRef)
+            .worktreeDetails(path: worktreePath, primaryRef: repo.snapshot?.baseRef)
     }
 
     /// Selects a worktree (or a repo's main checkout) and loads its details.
