@@ -82,6 +82,11 @@ private struct HeaderBar: View {
             }
             Spacer()
 
+            Button { Task { await model.rebuildRepoList(); await model.refreshAll() } } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+            }
+            .keyboardShortcut("r")
+            .help("Reload local status, branches and worktrees (no network) — ⌘R")
             Button { Task { await model.fetchAll() } } label: {
                 Label("Fetch All", systemImage: "arrow.down.circle")
             }
