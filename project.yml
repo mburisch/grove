@@ -1,0 +1,43 @@
+name: GitIt
+options:
+  bundleIdPrefix: com.mburisch
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+packages:
+  GitItCore:
+    path: Packages/GitItCore
+targets:
+  GitIt:
+    type: application
+    platform: macOS
+    sources:
+      - App
+    dependencies:
+      - package: GitItCore
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: GitIt
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSUIElement: true
+        LSApplicationCategoryType: public.app-category.developer-tools
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mburisch.GitIt
+        SWIFT_VERSION: "6.0"
+        MARKETING_VERSION: "0.1.0"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_APP_SANDBOX: NO
+        GENERATE_INFOPLIST_FILE: NO
+schemes:
+  GitIt:
+    build:
+      targets:
+        GitIt: all
+    test:
+      targets:
+        - package: GitItCore/GitItCoreTests
