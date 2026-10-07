@@ -2,7 +2,7 @@ name: GitIt
 options:
   bundleIdPrefix: com.mburisch
   deploymentTarget:
-    macOS: "15.0"
+    macOS: "27.0"
   createIntermediateGroups: true
 packages:
   GitItCore:
