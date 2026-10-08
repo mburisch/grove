@@ -630,6 +630,50 @@ final class AppModel {
         }
     }
 
+    /// Asks for confirmation, then deletes a local branch that has no worktree. The confirmation
+    /// counts, fresh, the commits that exist only on this branch and would be lost.
+    func confirmDeleteBranch(_ repo: RepoState, branch: BranchInfo) async {
+        let git = repository(repo)
+        let unique: Int
+        do {
+            unique = try await git.commitsOnlyOn(branch: branch.name)
+        } catch {
+            repo.fail(error)
+            return
+        }
+        let remote = branch.upstream.flatMap { branch.upstreamGone ? nil : "\n\nThe remote branch \($0) is not deleted." } ?? ""
+
+        let alert = NSAlert()
+        alert.messageText = "Delete the branch \(branch.name)?"
+        if unique > 0 {
+            alert.alertStyle = .critical
+            alert.informativeText = "\(unique) commit\(unique == 1 ? "" : "s") exist only on this branch "
+                + "(not on any other branch, tag or remote) and will be lost.\(remote)"
+            alert.addButton(withTitle: "Delete Branch and Commits")
+        } else {
+            alert.informativeText = "All of its commits are also on other branches, tags or remotes; nothing is lost.\(remote)"
+            alert.addButton(withTitle: "Delete Branch")
+        }
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.last?.keyEquivalent = "\u{1b}"
+        NSApp.activate()
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        await repo.enqueue("Deleting branch…") { [self] in
+            do {
+                try await git.deleteBranch(branch.name)
+                repo.lastMessage = "Deleted branch \(branch.name)"
+            } catch {
+                repo.fail(error)
+            }
+            await loadSnapshot(repo)
+            if pane == .branch(repo: repo.path, name: branch.name),
+               !(repo.snapshot?.branches.contains { $0.name == branch.name } ?? false) {
+                select(.repo(repo.path))
+            }
+        }
+    }
+
     private static func describe(_ status: WorkingTreeStatus) -> String {
         var parts: [String] = []
         if status.conflicted > 0 { parts.append("\(status.conflicted) conflicted") }

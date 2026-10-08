@@ -419,6 +419,21 @@ public struct GitRepository: Sendable {
         try await git.run(args, in: url, timeout: .seconds(120))
     }
 
+    // MARK: - Branches
+
+    /// Commits reachable from `branch` and from no other ref (branch, tag, remote branch, HEAD,
+    /// stash): the ones that deleting the branch would lose.
+    public func commitsOnlyOn(branch: String) async throws -> Int {
+        let ref = "refs/heads/\(branch)"
+        let count = try await git.output(["rev-list", "--count", ref, "--not", "--exclude=\(ref)", "--all"], in: url)
+        return Int(count) ?? 0
+    }
+
+    /// Deletes a local branch even if it isn't merged (the caller has confirmed). Its remote branch is kept.
+    public func deleteBranch(_ branch: String) async throws {
+        try await git.run(["branch", "-D", branch], in: url)
+    }
+
     /// Forgets worktrees whose folders no longer exist.
     public func pruneWorktrees() async throws {
         try await git.run(["worktree", "prune"], in: url)

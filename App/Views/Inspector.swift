@@ -263,6 +263,15 @@ private struct BranchInspector: View {
                 .font(.caption)
                 .disabled(repo.activity != nil)
                 .help("Check out \(branch.name) in a new worktree; you choose the folder")
+                Button(role: .destructive) {
+                    Task { await model.confirmDeleteBranch(repo, branch: branch) }
+                } label: {
+                    Label("Delete Branch…", systemImage: "trash")
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .disabled(repo.activity != nil)
+                .help("Delete this local branch after confirming; the remote branch is kept")
             }
             RepoBanners(repo: repo)
 

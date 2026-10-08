@@ -77,6 +77,13 @@ struct DiffTests {
         try await repo.removeWorktree(path: other.path, discardingChanges: false)
         let branch = await repo.fileDiff(FileChange(status: "A", path: "feature.txt"), scope: .branch(name: "feature", primaryRef: primary))
         #expect(branch.hunks.flatMap(\.lines).map(\.text) == ["one"])
+
+        // Deleting it would lose its one commit; a branch at the same commit makes it safe.
+        #expect(try await repo.commitsOnlyOn(branch: "feature") == 1)
+        try await sb.git.run(["branch", "feature-copy", "feature"], in: repo.url)
+        #expect(try await repo.commitsOnlyOn(branch: "feature") == 0)
+        try await repo.deleteBranch("feature")
+        #expect(try await repo.snapshot().branches.contains { $0.name == "feature" } == false)
     }
 
     private func lines(_ kinds: String) -> [DiffLine] {
