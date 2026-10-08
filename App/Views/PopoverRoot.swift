@@ -31,7 +31,7 @@ struct PopoverRoot: View {
         .frame(width: 1020, height: 660)
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             // Popover opened: refresh local status if it's a bit stale (local only, no network).
-            Task { await model.refreshAll(ifOlderThan: 20) }
+            Task { await model.refreshAll(ifOlderThan: 60) }
         }
     }
 }
@@ -193,7 +193,7 @@ struct ConvertMenu: View {
 
     var body: some View {
         let current = repo.snapshot?.mode
-        Menu("Checkout Mode") {
+        Menu(current.map { "\($0.label) Checkout" } ?? "Checkout Mode") {
             ForEach(CheckoutMode.allCases) { mode in
                 Button {
                     Task { await model.convert(repo, to: mode) }
@@ -221,6 +221,8 @@ struct Banner: View {
     enum Style { case error, info }
     let text: String
     let style: Style
+    /// An optional fix offered next to the message, e.g. ("Update Tag", …).
+    var action: (label: String, perform: () -> Void)?
     var onDismiss: (() -> Void)?
 
     var body: some View {
@@ -231,6 +233,10 @@ struct Banner: View {
                 .font(.callout)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if let action {
+                Button(action.label, action: action.perform)
+                    .controlSize(.small)
+            }
             if let onDismiss {
                 Button(action: onDismiss) { Image(systemName: "xmark") }
                     .buttonStyle(.borderless)

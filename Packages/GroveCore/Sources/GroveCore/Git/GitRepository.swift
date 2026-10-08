@@ -273,6 +273,16 @@ public struct GitRepository: Sendable {
         }
     }
 
+    /// Moves local tags to where the remote has them, overwriting the local copies.
+    /// Fixes a fetch rejected with "would clobber existing tag" (see `GitError.clobberedTags`).
+    public func updateTags(_ tags: [String], remote: String? = nil) async throws {
+        var remote = remote
+        if remote == nil { remote = try await primaryRemoteName() }
+        guard let remote, !tags.isEmpty else { return }
+        let refspecs = tags.map { "+refs/tags/\($0):refs/tags/\($0)" }
+        try await git.run(["fetch", "--no-tags", "--no-progress", remote] + refspecs, in: url, timeout: .seconds(600))
+    }
+
     public enum FastForwardOutcome: Sendable, Hashable {
         case updated(commits: Int)
         case upToDate

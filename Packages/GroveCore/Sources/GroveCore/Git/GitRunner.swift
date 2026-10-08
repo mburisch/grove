@@ -6,8 +6,25 @@ public struct GitError: Error, LocalizedError, Sendable {
     public var stderr: String
     public var timedOut: Bool = false
 
+    /// Tags a fetch refused to update because they moved on the remote, from git's
+    /// `! [rejected] latest -> latest (would clobber existing tag)` lines.
+    public var clobberedTags: [String] {
+        stderr.split(separator: "\n").compactMap { line in
+            guard line.contains("(would clobber existing tag)"),
+                  let arrow = line.range(of: " -> ") else { return nil }
+            return line[arrow.upperBound...].split(separator: " ").first.map(String.init)
+        }
+    }
+
     public var errorDescription: String? {
         if timedOut { return "git \(arguments.first ?? "") timed out" }
+        let tags = clobberedTags
+        if !tags.isEmpty {
+            let names = tags.map { "“\($0)”" }.joined(separator: ", ")
+            let (noun, pronoun) = tags.count == 1 ? ("Tag", "it") : ("Tags", "them")
+            return "\(noun) \(names) moved on the remote, and git won't overwrite the local copy, so the fetch "
+                + "stopped. Update \(pronoun) to the remote's version, or run: git fetch --force --tags"
+        }
         let message = stderr
             .split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }

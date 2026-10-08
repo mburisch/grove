@@ -253,6 +253,30 @@ struct RepositoryTests {
         try await sb.git.run(["-c", "remote.origin.promisor=false", "fsck", "--connectivity-only", "--no-progress"], in: repo.url)
     }
 
+    @Test func movedTagIsReportedAndFixable() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        try await sb.git.run(["tag", "latest"], in: sb.publisher)
+        try await sb.git.run(["push", "-q", "origin", "latest"], in: sb.publisher)
+        let repo = try await sb.clone("full", mode: .full)
+        // Auto-followed tags are never updated; the rejection needs tags fetched explicitly.
+        try await sb.git.run(["config", "remote.origin.tagOpt", "--tags"], in: repo.url)
+
+        // The remote moves `latest` to a new commit; a plain fetch refuses to overwrite it.
+        try await sb.publish(1)
+        try await sb.git.run(["tag", "-f", "latest"], in: sb.publisher)
+        try await sb.git.run(["push", "-q", "-f", "origin", "latest"], in: sb.publisher)
+        let error = await #expect(throws: GitError.self) { try await repo.fetch() }
+        #expect(error?.clobberedTags == ["latest"])
+        #expect(error?.errorDescription?.hasPrefix("Tag “latest” moved on the remote") == true)
+
+        try await repo.updateTags(["latest"])
+        let local = try await sb.git.output(["rev-parse", "latest"], in: repo.url)
+        let remote = try await sb.git.output(["rev-parse", "latest"], in: sb.publisher)
+        #expect(local == remote)
+        try await repo.fetch()
+    }
+
     @Test func scanner() async throws {
         let sb = try await Sandbox()
         defer { sb.cleanup() }

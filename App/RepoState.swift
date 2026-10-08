@@ -9,7 +9,11 @@ final class RepoState: Identifiable {
     var snapshot: RepoSnapshot?
     /// What the repository is doing right now, e.g. "Fetching…".
     var activity: String?
-    var lastError: String?
+    var lastError: String? {
+        didSet { if lastError == nil { clobberedTags = [] } }
+    }
+    /// Tags the last fetch refused to update because they moved on the remote; offered as a fix.
+    var clobberedTags: [String] = []
     /// Short result of the last user action, e.g. "Pulled 3 commits".
     var lastMessage: String?
     var lastFetchAttempt: Date?

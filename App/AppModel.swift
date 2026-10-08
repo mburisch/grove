@@ -26,6 +26,10 @@ final class AppModel {
     var configError: String?
     /// Repos whose worktrees are collapsed in the tree (expanded by default).
     var collapsed: Set<String> = []
+    /// Repos whose local branches (those without a worktree) are listed in the tree (collapsed by default).
+    var branchesExpanded: Set<String> = []
+    /// A repo or group is being dragged over the tree; enables auto-scrolling at its edges.
+    var draggingInTree = false
     /// Worktree details keyed by worktree path, loaded when a worktree is inspected.
     private(set) var details: [String: WorktreeDetails] = [:]
 
@@ -259,10 +263,27 @@ final class AppModel {
                 repo.consecutiveFailures = 0
             } catch {
                 repo.lastError = error.localizedDescription
+                repo.clobberedTags = (error as? GitError)?.clobberedTags ?? []
                 repo.consecutiveFailures += 1
             }
             await loadSnapshot(repo)
         }
+    }
+
+    /// Overwrites local tags that moved on the remote, then fetches again.
+    func updateClobberedTags(_ repo: RepoState) async {
+        let tags = repo.clobberedTags
+        await repo.enqueue("Updating tags…") { [self] in
+            do {
+                try await repository(repo).updateTags(tags, remote: repo.snapshot?.remoteName)
+                repo.lastError = nil
+                repo.lastMessage = "Updated \(tags.count == 1 ? "tag" : "tags") "
+                    + tags.joined(separator: ", ") + " to the remote's version"
+            } catch {
+                repo.lastError = error.localizedDescription
+            }
+        }
+        await fetch(repo)
     }
 
     func fetchAll() async {

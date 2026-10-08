@@ -489,17 +489,26 @@ private struct FileRow: View {
 // MARK: - Shared pieces
 
 private struct RepoBanners: View {
+    @Environment(AppModel.self) private var model
     let repo: RepoState
 
     var body: some View {
         if let error = repo.lastError {
-            Banner(text: error, style: .error) { repo.lastError = nil }
+            Banner(text: error, style: .error, action: fix) { repo.lastError = nil }
                 .clipShape(RoundedRectangle(cornerRadius: 6))
+                .disabled(repo.activity != nil)
         }
         if let message = repo.lastMessage {
             Banner(text: message, style: .info) { repo.lastMessage = nil }
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         }
+    }
+
+    /// Fetch rejected because tags moved on the remote: offer to overwrite the local copies.
+    private var fix: (label: String, perform: () -> Void)? {
+        guard !repo.clobberedTags.isEmpty else { return nil }
+        let label = repo.clobberedTags.count == 1 ? "Update Tag" : "Update Tags"
+        return (label, { Task { await model.updateClobberedTags(repo) } })
     }
 }
 

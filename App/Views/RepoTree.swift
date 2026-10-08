@@ -2,9 +2,8 @@ import AppKit
 import GroveCore
 import SwiftUI
 
-/// Column widths shared by repo and worktree rows so paths and status line up.
+/// Column widths shared by repo, worktree and branch rows so status and actions line up.
 private enum Column {
-    static let path: CGFloat = 210
     static let status: CGFloat = 130
     static let actions: CGFloat = 78
     static let indent: CGFloat = 20
@@ -53,14 +52,21 @@ struct RepoTree: View {
             }
             .listStyle(.inset)
             .alternatingRowBackgrounds()
+            .background(DragAutoScroller(active: Binding(
+                get: { model.draggingInTree },
+                set: { model.draggingInTree = $0 }
+            )))
         }
     }
 
     @ViewBuilder
     private func repoRows(_ repo: RepoState, group: RepoGroup.ID?, next: String?) -> some View {
-        let linked = repo.snapshot?.worktrees.filter { !$0.isMain } ?? []
+        let linked = (repo.snapshot?.worktrees.filter { !$0.isMain } ?? [])
+            .sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+        let free = (repo.snapshot?.branches.filter { $0.worktreePath == nil } ?? [])
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         let expanded = !model.collapsed.contains(repo.path)
-        RepoTreeRow(repo: repo, hasChildren: !linked.isEmpty, expanded: expanded)
+        RepoTreeRow(repo: repo, hasChildren: !linked.isEmpty || !free.isEmpty, expanded: expanded)
             .tag(Pane.repo(repo.path))
             .contextMenu { RepoContextMenu(repo: repo) }
             .draggable(DragItem.repo(repo.path).payload)
@@ -74,8 +80,23 @@ struct RepoTree: View {
                     // Dropping on a worktree inserts after its repo.
                     .modifier(RepoDropTarget(group: group, before: next))
             }
+            if !free.isEmpty {
+                BranchesHeaderRow(repo: repo, count: free.count)
+                    .modifier(RepoDropTarget(group: group, before: next))
+                if model.branchesExpanded.contains(repo.path) {
+                    ForEach(free) { branch in
+                        BranchTreeRow(repo: repo, branch: branch)
+                            .modifier(RepoDropTarget(group: group, before: next))
+                    }
+                }
+            }
         }
     }
+}
+
+private extension WorktreeInfo {
+    /// The tree's label: the checked-out branch, or the commit for a detached HEAD.
+    var displayName: String { branch ?? "detached @ \(head.prefix(7))" }
 }
 
 /// Drag payloads are plain strings so they work with `draggable`/`dropDestination` without a custom UTType.
@@ -123,7 +144,7 @@ private struct RepoDropTarget: ViewModifier {
                     moved = true
                 }
                 return moved
-            } isTargeted: { targeted = $0 }
+            } isTargeted: { targeted = $0; if $0 { model.draggingInTree = true } }
     }
 }
 
@@ -154,12 +175,9 @@ private struct GroupHeader: View {
     var body: some View {
         HStack(spacing: 6) {
             if let group {
-                Button { model.toggleGroup(group.id) } label: {
-                    Image(systemName: group.collapsed ? "chevron.right" : "chevron.down")
-                        .font(.caption2.weight(.bold))
-                        .frame(width: 12)
+                DisclosureChevron(expanded: !group.collapsed, font: .caption2.weight(.bold)) {
+                    model.toggleGroup(group.id)
                 }
-                .buttonStyle(.borderless)
                 if model.renamingGroup == group.id {
                     TextField("Group name", text: $name)
                         .textFieldStyle(.plain)
@@ -181,6 +199,9 @@ private struct GroupHeader: View {
                 .foregroundStyle(.tertiary)
                 .monospacedDigit()
             Rectangle().fill(.separator).frame(height: 1)
+            IconButton("arrow.down.circle", help: group == nil ? "Fetch all ungrouped repos" : "Fetch all repos in this group") {
+                Task { await model.fetch(group: group?.id) }
+            }
             if let group {
                 Menu {
                     Button("Fetch Group") { Task { await model.fetch(group: group.id) } }
@@ -222,7 +243,7 @@ private struct GroupHeader: View {
                 handled = true
             }
             return handled
-        } isTargeted: { targeted = $0 }
+        } isTargeted: { targeted = $0; if $0 { model.draggingInTree = true } }
     }
 }
 
@@ -249,33 +270,31 @@ private struct RepoTreeRow: View {
         let main = repo.mainWorktree
         let primary = repo.snapshot?.primaryBranch
         HStack(spacing: 8) {
-            Button {
+            DisclosureChevron(expanded: expanded) {
                 if expanded { model.collapsed.insert(repo.path) } else { model.collapsed.remove(repo.path) }
-            } label: {
-                Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 12)
             }
-            .buttonStyle(.borderless)
             .opacity(hasChildren ? 1 : 0)
             .disabled(!hasChildren)
 
-            HStack(spacing: 5) {
-                Text(repo.name).fontWeight(.semibold).lineLimit(1)
-                if let branch = main?.branch {
-                    Text("(\(branch))")
-                        .foregroundStyle(branch == primary ? Color.secondary : Color.orange)
-                        .lineLimit(1)
-                } else if let main {
-                    Text("(\(main.head.prefix(7)))").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 5) {
+                    // The name wins over the branch label when space runs out.
+                    Text(repo.name).fontWeight(.semibold).lineLimit(1).layoutPriority(1).help(repo.name)
+                    if let branch = main?.branch {
+                        Text("(\(branch))")
+                            .foregroundStyle(branch == primary ? Color.secondary : Color.orange)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(branch)
+                    } else if let main {
+                        Text("(\(main.head.prefix(7)))").foregroundStyle(.orange)
+                    }
+                    if let mode = repo.snapshot?.mode, mode != .full { ModeChip(mode: mode) }
+                    AutoFetchChip(repo: repo)
                 }
-                if let mode = repo.snapshot?.mode, mode != .full { ModeChip(mode: mode) }
-                AutoFetchChip(repo: repo)
+                PathText(path: repo.displayPath)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-
-            PathText(path: repo.displayPath)
 
             StatusCell(
                 worktree: main,
@@ -342,21 +361,22 @@ private struct WorktreeTreeRow: View {
     var body: some View {
         HStack(spacing: 8) {
             Color.clear.frame(width: 12)
-            HStack(spacing: 5) {
-                Image(systemName: "arrow.triangle.branch")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(worktree.branch ?? "detached @ \(worktree.head.prefix(7))")
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if worktree.isPrunable {
-                    Text("missing").font(.caption).foregroundStyle(.red)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(worktree.displayName)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if worktree.isPrunable {
+                        Text("missing").font(.caption).foregroundStyle(.red)
+                    }
                 }
+                PathText(path: worktree.path.abbreviatingWithTilde)
             }
             .padding(.leading, Column.indent)
             .frame(maxWidth: .infinity, alignment: .leading)
-
-            PathText(path: worktree.path.abbreviatingWithTilde)
 
             StatusCell(worktree: worktree, activity: nil, error: nil, showTracking: false, loading: false)
 
@@ -375,6 +395,83 @@ private struct WorktreeTreeRow: View {
     }
 }
 
+/// "Branches (n)" under a repo's worktrees; toggles the list of local branches without a worktree.
+private struct BranchesHeaderRow: View {
+    @Environment(AppModel.self) private var model
+    let repo: RepoState
+    let count: Int
+
+    var body: some View {
+        let expanded = model.branchesExpanded.contains(repo.path)
+        Button {
+            if expanded { model.branchesExpanded.remove(repo.path) } else { model.branchesExpanded.insert(repo.path) }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 12)
+                Text("Branches")
+                Text("\(count)").font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(.leading, 12 + 8 + Column.indent)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, 2)
+    }
+}
+
+/// A local branch that isn't checked out in any worktree.
+private struct BranchTreeRow: View {
+    @Environment(AppModel.self) private var model
+    let repo: RepoState
+    let branch: BranchInfo
+
+    var body: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Text(branch.name)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .layoutPriority(1)
+                    .help(branch.name)
+                upstream
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .padding(.leading, 12 + 8 + Column.indent * 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            AheadBehindBadge(value: branch.tracking, showSynced: false)
+                .frame(width: Column.status, alignment: .trailing)
+
+            HStack(spacing: 6) {
+                if let tracking = branch.tracking, tracking.behind > 0, tracking.ahead == 0 {
+                    IconButton("arrow.down.to.line", help: "Fast-forward to \(branch.upstream ?? "upstream")") {
+                        Task { await model.fastForward(repo, branch: branch) }
+                    }
+                    .disabled(repo.activity != nil)
+                }
+            }
+            .frame(width: Column.actions, alignment: .trailing)
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder private var upstream: some View {
+        if branch.upstreamGone {
+            Text("upstream gone").foregroundStyle(.red)
+        } else if let upstream = branch.upstream {
+            Text(upstream).foregroundStyle(.secondary).help(upstream)
+        } else {
+            Text("no upstream").foregroundStyle(.tertiary)
+        }
+    }
+}
+
 private struct PathText: View {
     let path: String
 
@@ -385,7 +482,6 @@ private struct PathText: View {
             .lineLimit(1)
             .truncationMode(.middle)
             .help(path)
-            .frame(width: Column.path, alignment: .leading)
     }
 }
 
@@ -453,6 +549,29 @@ struct CompactDiff: View {
             .font(.caption.monospacedDigit())
             .help("\(stat.files) file\(stat.files == 1 ? "" : "s") changed vs primary branch")
         }
+    }
+}
+
+/// Expand/collapse chevron whose click target extends well past the glyph while it still
+/// lays out 12 pt wide, so columns stay aligned.
+struct DisclosureChevron: View {
+    let expanded: Bool
+    var font: Font = .caption.weight(.semibold)
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                .font(font)
+                .foregroundStyle(.secondary)
+                .frame(width: 12)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, -8)
+        .padding(.vertical, -6)
     }
 }
 
