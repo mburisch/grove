@@ -58,9 +58,18 @@ private struct RepoInspector: View {
                         Text(activity).font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                Button(repo.displayPath) { NSWorkspace.shared.activateFileViewerSelecting([repo.url]) }
-                    .buttonStyle(.link)
-                    .help("Reveal in Finder")
+                HStack(alignment: .firstTextBaseline) {
+                    Button(repo.displayPath) { NSWorkspace.shared.activateFileViewerSelecting([repo.url]) }
+                        .buttonStyle(.link)
+                        .help("Reveal in Finder")
+                    Spacer()
+                    Button { model.showGitOutput(for: repo) } label: {
+                        Label("Git Output", systemImage: "text.alignleft")
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .help("The git commands run for this repository and what they printed")
+                }
             }
 
             RepoBanners(repo: repo)
@@ -494,12 +503,14 @@ private struct RepoBanners: View {
 
     var body: some View {
         if let error = repo.lastError {
-            Banner(text: error, style: .error, action: fix) { repo.lastError = nil }
+            Banner(text: error, style: .error, action: fix, actionDisabled: repo.activity != nil,
+                   onDismiss: { repo.lastError = nil },
+                   details: { model.showGitOutput(for: repo, selecting: .latestProblem) })
                 .clipShape(RoundedRectangle(cornerRadius: 6))
-                .disabled(repo.activity != nil)
         }
         if let message = repo.lastMessage {
-            Banner(text: message, style: .info) { repo.lastMessage = nil }
+            Banner(text: message, style: .info, onDismiss: { repo.lastMessage = nil },
+                   details: { model.showGitOutput(for: repo) })
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         }
     }

@@ -13,7 +13,9 @@ struct PopoverRoot: View {
                 Banner(text: error, style: .error) { model.configError = nil }
                 Divider()
             }
-            if let pane = model.pane, pane.isPage {
+            if model.pane == .gitLog {
+                Page(title: "Git Output", maxWidth: .infinity) { GitOutputView() }
+            } else if let pane = model.pane, pane.isPage {
                 Page(title: pane == .clone ? "Clone Repository" : "Settings") {
                     if pane == .clone { CloneView() } else { SettingsView() }
                 }
@@ -41,6 +43,7 @@ struct PopoverRoot: View {
 private struct Page<Content: View>: View {
     @Environment(AppModel.self) private var model
     let title: String
+    var maxWidth: CGFloat = 640
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -55,7 +58,7 @@ private struct Page<Content: View>: View {
             .padding(.vertical, 6)
             Divider()
             content
-                .frame(maxWidth: 640)
+                .frame(maxWidth: maxWidth)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
@@ -113,6 +116,10 @@ private struct HeaderBar: View {
             .fixedSize()
             .help("Add or clone a repository")
 
+            Button { if model.pane == .gitLog { model.pane = nil } else { model.showGitOutput() } } label: {
+                Image(systemName: "text.alignleft")
+            }
+            .help("Git Output: the commands Grove ran and what git printed")
             Button { model.pane = model.pane == .settings ? nil : .settings } label: {
                 Image(systemName: "gearshape")
             }
@@ -224,7 +231,12 @@ struct Banner: View {
     let style: Style
     /// An optional fix offered next to the message, e.g. ("Update Tag", …).
     var action: (label: String, perform: () -> Void)?
+    /// Disables only the fix, e.g. while the repo is busy; details and dismiss stay usable.
+    var actionDisabled = false
     var onDismiss: (() -> Void)?
+    /// Opens more detail, e.g. the git output behind an error. Declared after `onDismiss` so a
+    /// trailing closure keeps meaning "dismiss".
+    var details: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
@@ -236,6 +248,11 @@ struct Banner: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let action {
                 Button(action.label, action: action.perform)
+                    .controlSize(.small)
+                    .disabled(actionDisabled)
+            }
+            if let details {
+                Button("Show Output", action: details)
                     .controlSize(.small)
             }
             if let onDismiss {

@@ -5,6 +5,8 @@ public struct GitError: Error, LocalizedError, Sendable {
     public var exitCode: Int32
     public var stderr: String
     public var timedOut: Bool = false
+    /// Set when git could not be started at all, e.g. "Bad file descriptor (POSIX error 9)".
+    public var launchFailure: String?
 
     /// Tags a fetch refused to update because they moved on the remote, from git's
     /// `! [rejected] latest -> latest (would clobber existing tag)` lines.
@@ -17,7 +19,9 @@ public struct GitError: Error, LocalizedError, Sendable {
     }
 
     public var errorDescription: String? {
-        if timedOut { return "git \(arguments.first ?? "") timed out" }
+        let command = "git \(arguments.first ?? "")"
+        if let launchFailure { return "Couldn't start \(command): \(launchFailure)" }
+        if timedOut { return "\(command) timed out" }
         let tags = clobberedTags
         if !tags.isEmpty {
             let names = tags.map { "“\($0)”" }.joined(separator: ", ")
@@ -30,7 +34,7 @@ public struct GitError: Error, LocalizedError, Sendable {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && !$0.hasPrefix("hint:") }
             .last ?? "exit code \(exitCode)"
-        return "git \(arguments.first ?? ""): \(message)"
+        return "\(command): \(message.unescapingUnicode)"
     }
 }
 
@@ -40,15 +44,60 @@ public struct GitResult: Sendable {
     public var exitCode: Int32
 }
 
+/// One git invocation as shown in the output log. Reported when it starts and again when it ends
+/// (same `id`); `finished` is nil while it runs.
+public struct GitRunRecord: Sendable, Hashable, Identifiable {
+    public var id: UUID
+    public var arguments: [String]
+    public var directory: String?
+    public var started: Date
+    public var finished: Date?
+    public var exitCode: Int32?
+    public var stdout: String = ""
+    public var stderr: String = ""
+    /// Why the run failed without a normal exit: could not start, timed out or was cancelled.
+    public var failure: String?
+
+    public var isRunning: Bool { finished == nil }
+    public var succeeded: Bool { finished != nil && failure == nil && exitCode == 0 }
+    public var duration: TimeInterval? { finished.map { $0.timeIntervalSince(started) } }
+    public var commandLine: String { (["git"] + arguments).joined(separator: " ") }
+
+    /// True for read-only lookups (status, rev-parse, log, …) that Grove runs to refresh its view,
+    /// as opposed to actions like fetch, pull or worktree add.
+    public var isQuery: Bool {
+        let subcommand = arguments.first { !$0.hasPrefix("-") } ?? ""
+        switch subcommand {
+        case "status", "rev-parse", "for-each-ref", "log", "rev-list", "diff", "show", "ls-files",
+             "cat-file", "symbolic-ref", "merge-base", "describe", "count-objects", "ls-remote", "":
+            return true
+        case "config":
+            return !arguments.contains { ["--add", "--unset", "--unset-all", "--replace-all"].contains($0) }
+                && arguments.filter { !$0.hasPrefix("-") }.count <= 2
+        case "worktree", "remote", "branch":
+            return arguments.count == 1 || arguments.contains { ["list", "-v", "--list", "--show-current", "get-url"].contains($0) }
+        default:
+            return false
+        }
+    }
+}
+
 /// Runs the git CLI. Stateless and safe to share; each call spawns its own process.
 public struct GitRunner: Sendable {
     public var gitPath: String
     /// Shared cap on concurrent git processes; nil runs without a limit.
     public var limiter: GitLimiter?
+    /// Receives every run when it starts and when it ends, for the output log.
+    public var onRecord: (@Sendable (GitRunRecord) -> Void)?
 
-    public init(gitPath: String = GitRunner.defaultGitPath, limiter: GitLimiter? = nil) {
+    public init(
+        gitPath: String = GitRunner.defaultGitPath,
+        limiter: GitLimiter? = nil,
+        onRecord: (@Sendable (GitRunRecord) -> Void)? = nil
+    ) {
         self.gitPath = gitPath
         self.limiter = limiter
+        self.onRecord = onRecord
     }
 
     public static var defaultGitPath: String {
@@ -73,6 +122,9 @@ public struct GitRunner: Sendable {
         return env
     }()
 
+    /// How often a start that fails with a transient error (EBADF, EAGAIN, EINTR) is tried.
+    private static let launchAttempts = 3
+
     /// Runs git and returns its output, throwing `GitError` on a non-zero exit (unless `check` is false).
     @discardableResult
     public func run(
@@ -84,15 +136,16 @@ public struct GitRunner: Sendable {
         onStderr: (@Sendable (String) -> Void)? = nil
     ) async throws -> GitResult {
         guard let limiter else {
-            return try await launch(arguments, in: directory, timeout: timeout, check: check, input: input, onStderr: onStderr)
+            return try await recorded(arguments, in: directory, timeout: timeout, check: check, input: input, onStderr: onStderr)
         }
         // The timeout starts once a slot is free, so waiting in the queue never times a run out.
         return try await limiter.withSlot {
-            try await launch(arguments, in: directory, timeout: timeout, check: check, input: input, onStderr: onStderr)
+            try await recorded(arguments, in: directory, timeout: timeout, check: check, input: input, onStderr: onStderr)
         }
     }
 
-    private func launch(
+    /// Runs git, retrying transient start failures, and reports the run to `onRecord`.
+    private func recorded(
         _ arguments: [String],
         in directory: URL?,
         timeout: Duration,
@@ -100,6 +153,85 @@ public struct GitRunner: Sendable {
         input: Data?,
         onStderr: (@Sendable (String) -> Void)?
     ) async throws -> GitResult {
+        var record = GitRunRecord(id: UUID(), arguments: arguments, directory: directory?.path, started: .now)
+        onRecord?(record)
+        var outcome: Result<Outcome, Error>
+        var attempt = 1
+        while true {
+            do {
+                outcome = .success(try await launch(arguments, in: directory, timeout: timeout, input: input, onStderr: onStderr))
+            } catch let failure as LaunchFailure where failure.isTransient && attempt < Self.launchAttempts {
+                attempt += 1
+                try? await Task.sleep(for: .milliseconds(100 * attempt))
+                continue
+            } catch {
+                outcome = .failure(error)
+            }
+            break
+        }
+
+        record.finished = .now
+        let result: GitResult
+        switch outcome {
+        case .success(let run):
+            result = run.result
+            record.exitCode = result.exitCode
+            record.stdout = Self.clipped(result.stdout)
+            record.stderr = Self.clipped(result.stderr)
+            if run.timedOut { record.failure = "Timed out after \(timeout)" }
+            if attempt > 1 { record.stderr = "(started on attempt \(attempt))\n" + record.stderr }
+        case .failure(let error as LaunchFailure):
+            record.failure = "Couldn't start git (\(attempt) attempts): \(error.message)"
+            onRecord?(record)
+            throw GitError(arguments: arguments, exitCode: -1, stderr: "", launchFailure: error.message)
+        case .failure(let error):
+            record.failure = error is CancellationError ? "Cancelled" : "\(error)"
+            onRecord?(record)
+            throw error
+        }
+        if Task.isCancelled && record.failure == nil { record.failure = "Cancelled" }
+        onRecord?(record)
+
+        if case .success(let run) = outcome, run.timedOut {
+            throw GitError(arguments: arguments, exitCode: result.exitCode, stderr: result.stderr, timedOut: true)
+        }
+        try Task.checkCancellation()
+        if check && result.exitCode != 0 {
+            throw GitError(arguments: arguments, exitCode: result.exitCode, stderr: result.stderr)
+        }
+        return result
+    }
+
+    fileprivate struct Outcome {
+        var result: GitResult
+        var timedOut: Bool
+    }
+
+    /// `Process.run()` failed; git never started.
+    private struct LaunchFailure: Error {
+        var error: NSError
+
+        var isTransient: Bool {
+            error.domain == NSPOSIXErrorDomain && [EBADF, EAGAIN, EINTR].contains(Int32(error.code))
+        }
+
+        var message: String {
+            let reason = (error.userInfo[NSLocalizedFailureReasonErrorKey] as? String)
+                ?? error.localizedDescription.unescapingUnicode
+            return "\(reason) (\(error.domain) \(error.code))"
+        }
+    }
+
+    /// Starts one git process and collects its output. Output is read with blocking reads on
+    /// background threads until EOF, which avoids `FileHandle.readabilityHandler` and its
+    /// dispatch sources.
+    private func launch(
+        _ arguments: [String],
+        in directory: URL?,
+        timeout: Duration,
+        input: Data?,
+        onStderr: (@Sendable (String) -> Void)?
+    ) async throws -> Outcome {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: gitPath)
         process.arguments = arguments
@@ -113,20 +245,8 @@ public struct GitRunner: Sendable {
         let stdinPipe = input.map { _ in Pipe() }
         process.standardInput = stdinPipe ?? FileHandle.nullDevice
 
-        let stdoutBuffer = DataBuffer()
-        let stderrBuffer = DataBuffer()
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            stdoutBuffer.append(handle.availableData)
-        }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            stderrBuffer.append(data)
-            if let onStderr, !data.isEmpty, let text = String(data: data, encoding: .utf8) {
-                onStderr(text)
-            }
-        }
-
         let timedOut = Flag()
+        let readers = Readers()
         let exitCode: Int32 = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 process.terminationHandler = { process in
@@ -136,22 +256,26 @@ public struct GitRunner: Sendable {
                     try process.run()
                 } catch {
                     process.terminationHandler = nil
-                    continuation.resume(throwing: error)
+                    continuation.resume(throwing: LaunchFailure(error: error as NSError))
                     return
+                }
+                // Started right away so a child writing more than a pipe buffer never blocks.
+                readers.stdout = StreamReader(stdoutPipe.fileHandleForReading)
+                readers.stderr = StreamReader(stderrPipe.fileHandleForReading) { data in
+                    if let onStderr, let text = String(data: data, encoding: .utf8) { onStderr(text) }
                 }
                 if let stdinPipe, let input {
                     // Written off the caller's thread so a large input can't block on a full pipe.
-                    Task.detached {
+                    DispatchQueue.global().async {
                         try? stdinPipe.fileHandleForWriting.write(contentsOf: input)
                         try? stdinPipe.fileHandleForWriting.close()
                     }
                 }
-                let pid = process
                 Task.detached {
                     try? await Task.sleep(for: timeout)
-                    if pid.isRunning {
+                    if process.isRunning {
                         timedOut.set()
-                        pid.terminate()
+                        process.terminate()
                     }
                 }
             }
@@ -159,25 +283,17 @@ public struct GitRunner: Sendable {
             if process.isRunning { process.terminate() }
         }
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
-        // Drain anything left after the handlers were removed.
-        stdoutBuffer.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
-        stderrBuffer.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
+        // The child has exited; collect the rest of its output up to EOF.
+        let stdout = await readers.stdout?.finish() ?? ""
+        let stderr = await readers.stderr?.finish() ?? ""
+        return Outcome(result: GitResult(stdout: stdout, stderr: stderr, exitCode: exitCode), timedOut: timedOut.isSet)
+    }
 
-        let result = GitResult(
-            stdout: stdoutBuffer.string,
-            stderr: stderrBuffer.string,
-            exitCode: exitCode
-        )
-        if timedOut.isSet {
-            throw GitError(arguments: arguments, exitCode: exitCode, stderr: result.stderr, timedOut: true)
-        }
-        try Task.checkCancellation()
-        if check && exitCode != 0 {
-            throw GitError(arguments: arguments, exitCode: exitCode, stderr: result.stderr)
-        }
-        return result
+    /// Keeps the log small: the last 32 KB of a stream.
+    private static func clipped(_ text: String) -> String {
+        let limit = 32_000
+        guard text.utf8.count > limit else { return text }
+        return "…\n" + String(decoding: text.utf8.suffix(limit), as: UTF8.self)
     }
 
     /// Convenience: run in a repository and return trimmed stdout.
@@ -192,6 +308,37 @@ public struct GitRunner: Sendable {
               result.exitCode == 0 else { return nil }
         return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+}
+
+/// Reads a pipe until EOF on a background thread with blocking reads.
+private final class StreamReader: @unchecked Sendable {
+    private let buffer = DataBuffer()
+    private let done = DispatchGroup()
+
+    init(_ handle: FileHandle, onChunk: (@Sendable (Data) -> Void)? = nil) {
+        done.enter()
+        DispatchQueue.global(qos: .utility).async { [buffer, done] in
+            while let chunk = try? handle.read(upToCount: 65_536), !chunk.isEmpty {
+                buffer.append(chunk)
+                onChunk?(chunk)
+            }
+            done.leave()
+        }
+    }
+
+    /// Waits for EOF and returns everything read.
+    func finish() async -> String {
+        await withCheckedContinuation { continuation in
+            done.notify(queue: .global()) { continuation.resume() }
+        }
+        return buffer.string
+    }
+}
+
+/// The readers of one run, created once the process has started.
+private final class Readers: @unchecked Sendable {
+    var stdout: StreamReader?
+    var stderr: StreamReader?
 }
 
 private final class DataBuffer: @unchecked Sendable {
@@ -213,4 +360,24 @@ private final class Flag: @unchecked Sendable {
     private var value = false
     func set() { lock.withLock { value = true } }
     var isSet: Bool { lock.withLock { value } }
+}
+
+extension String {
+    /// Turns `\U2019`-style escapes, as found in printed `NSError`/`NSDictionary` descriptions,
+    /// back into the characters they stand for.
+    public var unescapingUnicode: String {
+        guard contains("\\U") || contains("\\u") else { return self }
+        var result = ""
+        var rest = self[...]
+        while let escape = rest.range(of: #"\\[Uu][0-9A-Fa-f]{4}"#, options: .regularExpression) {
+            result += rest[..<escape.lowerBound]
+            if let scalar = UInt32(rest[escape].dropFirst(2), radix: 16).flatMap(Unicode.Scalar.init) {
+                result.unicodeScalars.append(scalar)
+            } else {
+                result += rest[escape]
+            }
+            rest = rest[escape.upperBound...]
+        }
+        return result + rest
+    }
 }

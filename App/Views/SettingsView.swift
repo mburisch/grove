@@ -203,7 +203,7 @@ struct SettingsView: View {
             if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
             loginError = nil
         } catch {
-            loginError = error.localizedDescription
+            loginError = error.localizedDescription.unescapingUnicode
             launchAtLogin = SMAppService.mainApp.status == .enabled
         }
     }

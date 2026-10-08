@@ -9,8 +9,9 @@ enum Pane: Hashable {
     case worktree(repo: String, path: String)
     case clone
     case settings
+    case gitLog
 
-    var isPage: Bool { self == .clone || self == .settings }
+    var isPage: Bool { self == .clone || self == .settings || self == .gitLog }
 }
 
 @MainActor @Observable
@@ -52,11 +53,30 @@ final class AppModel {
         self.config = config
     }
 
+    /// Every git run, for the Git Output page.
+    let gitLog = GitLog()
+    /// Repo the Git Output page is narrowed to, if any.
+    var gitLogRepo: String?
+
     var git: GitRunner {
-        GitRunner(
+        let log = gitLog
+        return GitRunner(
             gitPath: config.gitPath.isEmpty ? GitRunner.defaultGitPath : config.gitPath.expandingTilde,
-            limiter: gitLimiter
+            limiter: gitLimiter,
+            onRecord: { run in Task { @MainActor in log.record(run) } }
         )
+    }
+
+    /// Which run the Git Output page selects when it opens.
+    enum GitLogFocus { case latestAction, latestProblem }
+    var gitLogFocus: GitLogFocus?
+
+    /// Opens the Git Output page, narrowed to one repo when given, with its latest action
+    /// (fetch, pull, …) selected, or its latest failed run when opened from an error.
+    func showGitOutput(for repo: RepoState? = nil, selecting focus: GitLogFocus = .latestAction) {
+        gitLogRepo = repo?.path
+        gitLogFocus = repo == nil ? nil : focus
+        pane = .gitLog
     }
 
     func repository(_ repo: RepoState) -> GitRepository {
@@ -155,7 +175,7 @@ final class AppModel {
             try store.save(config)
             configError = nil
         } catch {
-            configError = "Could not save settings: \(error.localizedDescription)"
+            configError = "Could not save settings: \(error.localizedDescription.unescapingUnicode)"
         }
     }
 
@@ -234,7 +254,7 @@ final class AppModel {
             default: break
             }
         } catch {
-            repo.lastError = error.localizedDescription
+            repo.lastError = error.localizedDescription.unescapingUnicode
         }
     }
 
@@ -274,7 +294,7 @@ final class AppModel {
                 repo.lastError = nil
                 repo.consecutiveFailures = 0
             } catch {
-                repo.lastError = error.localizedDescription
+                repo.lastError = error.localizedDescription.unescapingUnicode
                 repo.clobberedTags = (error as? GitError)?.clobberedTags ?? []
                 repo.consecutiveFailures += 1
             }
@@ -292,7 +312,7 @@ final class AppModel {
                 repo.lastMessage = "Updated \(tags.count == 1 ? "tag" : "tags") "
                     + tags.joined(separator: ", ") + " to the remote's version"
             } catch {
-                repo.lastError = error.localizedDescription
+                repo.lastError = error.localizedDescription.unescapingUnicode
             }
         }
         await fetch(repo)
@@ -327,7 +347,7 @@ final class AppModel {
                         if (wt.tracking?.behind ?? 0) > 0 { skipped.append("\(wt.branch ?? "HEAD"): \(reason)") }
                     }
                 } catch {
-                    skipped.append("\(wt.branch ?? "HEAD"): \(error.localizedDescription)")
+                    skipped.append("\(wt.branch ?? "HEAD"): \(error.localizedDescription.unescapingUnicode)")
                 }
             }
             for branch in snapshot.branches where branch.worktreePath == nil && (branch.tracking?.behind ?? 0) > 0 {
@@ -352,7 +372,7 @@ final class AppModel {
                 case .skipped(let reason): "\(worktree.branch ?? "HEAD") not updated: \(reason)"
                 }
             } catch {
-                repo.lastError = error.localizedDescription
+                repo.lastError = error.localizedDescription.unescapingUnicode
             }
             await loadSnapshot(repo)
         }
@@ -365,7 +385,7 @@ final class AppModel {
                     repo.lastMessage = "\(branch.name) not updated: \(reason)"
                 }
             } catch {
-                repo.lastError = error.localizedDescription
+                repo.lastError = error.localizedDescription.unescapingUnicode
             }
             await loadSnapshot(repo)
         }
@@ -388,7 +408,7 @@ final class AppModel {
                 repo.lastError = nil
                 repo.lastMessage = "Converted to \(mode.label.lowercased()) checkout"
             } catch {
-                repo.lastError = error.localizedDescription
+                repo.lastError = error.localizedDescription.unescapingUnicode
             }
             await loadSnapshot(repo)
         }
@@ -417,7 +437,7 @@ final class AppModel {
                 }
                 return
             } catch {
-                repo.lastError = error.localizedDescription
+                repo.lastError = error.localizedDescription.unescapingUnicode
             }
             await loadSnapshot(repo)
         }
@@ -454,7 +474,7 @@ final class AppModel {
             } catch is CancellationError {
                 clone.error = "Clone cancelled"
             } catch {
-                clone.error = error.localizedDescription
+                clone.error = error.localizedDescription.unescapingUnicode
             }
         }
     }
@@ -495,7 +515,7 @@ final class AppModel {
             }
             NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration()) { _, error in
                 if let error {
-                    Task { @MainActor in self.configError = "\(launcher.name): \(error.localizedDescription)" }
+                    Task { @MainActor in self.configError = "\(launcher.name): \(error.localizedDescription.unescapingUnicode)" }
                 }
             }
         case .command(let template):
@@ -503,7 +523,7 @@ final class AppModel {
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             process.arguments = ["-lc", Launcher.expand(template, path: path)]
             process.currentDirectoryURL = url
-            do { try process.run() } catch { configError = "\(launcher.name): \(error.localizedDescription)" }
+            do { try process.run() } catch { configError = "\(launcher.name): \(error.localizedDescription.unescapingUnicode)" }
         }
     }
 
