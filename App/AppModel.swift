@@ -3,7 +3,7 @@ import GroveCore
 import Network
 import Observation
 
-/// What the popover shows: a selection in the tree (with the inspector), or a full-width page.
+/// What the window shows: a selection in the tree (with the inspector), or a full-width page.
 enum Pane: Hashable {
     case repo(String)
     case worktree(repo: String, path: String)

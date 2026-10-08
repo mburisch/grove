@@ -169,7 +169,7 @@ struct SettingsView: View {
                     Text(loginError).font(.caption).foregroundStyle(.red)
                 }
                 Button("Reset Window Size") {
-                    NSApp.windows.compactMap { $0 as? MainPanel }.first?.resetSize()
+                    NSApp.windows.compactMap { $0 as? MainWindow }.first?.resetSize()
                 }
             }
         }

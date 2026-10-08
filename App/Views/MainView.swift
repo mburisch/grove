@@ -2,12 +2,28 @@ import AppKit
 import GroveCore
 import SwiftUI
 
-struct PopoverRoot: View {
+struct MainView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        // The header sits in the title bar, next to the window buttons, and is as tall as the title
+        // bar so its controls line up with them. The reader's top inset is the title bar height.
+        GeometryReader { proxy in
+            content(titlebarHeight: proxy.safeAreaInsets.top)
+                .ignoresSafeArea(.container, edges: .top)
+        }
+        .frame(minWidth: MainWindow.minimumSize.width, maxWidth: .infinity,
+               minHeight: MainWindow.minimumSize.height, maxHeight: .infinity)
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            // Window focused: refresh local status if it's a bit stale (local only, no network).
+            Task { await model.refreshAll(ifOlderThan: 60) }
+        }
+    }
+
+    private func content(titlebarHeight: CGFloat) -> some View {
         VStack(spacing: 0) {
             HeaderBar()
+                .frame(height: max(titlebarHeight, 30))
             Divider()
             if let error = model.configError {
                 Banner(text: error, style: .error) { model.configError = nil }
@@ -35,16 +51,10 @@ struct PopoverRoot: View {
                 }
             }
         }
-        .frame(minWidth: MainPanel.minimumSize.width, maxWidth: .infinity,
-               minHeight: MainPanel.minimumSize.height, maxHeight: .infinity)
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
-            // Popover opened: refresh local status if it's a bit stale (local only, no network).
-            Task { await model.refreshAll(ifOlderThan: 60) }
-        }
     }
 }
 
-extension PopoverRoot {
+extension MainView {
     /// The worktree's branch, or the branch name for a branch without a worktree.
     private func diffTitle(_ request: DiffRequest) -> String {
         if case .worktree(let path) = request.target,
@@ -149,7 +159,7 @@ private struct HeaderBar: View {
         }
         .buttonStyle(.borderless)
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.leading, 66)  // Clears the close/minimize/zoom buttons in the transparent title bar.
     }
 }
 

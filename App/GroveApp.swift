@@ -7,22 +7,25 @@ struct GroveApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        // The UI lives in a status item + panel owned by AppDelegate; SwiftUI needs at least one scene.
+        // The UI lives in a status item + window owned by AppDelegate; SwiftUI needs at least one scene.
+        // Its only job is the main menu, which is shown while the window is open.
         Settings { EmptyView() }
+            .commands {
+                CommandGroup(replacing: .appSettings) {
+                    Button("Settings…") { appDelegate.showSettings() }
+                        .keyboardShortcut(",")
+                }
+            }
     }
 }
 
-/// Owns the menu bar item and the panel. A `MenuBarExtra` window is always anchored under its
-/// icon and can run off-screen at this size, so the panel is managed by hand and centered instead.
+/// Owns the menu bar item and the main window. Grove is a menu bar app (no Dock icon) while the
+/// window is closed, and a regular app (Dock icon, Cmd-Tab, menu bar) while it is open.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let model = AppModel()
     private var statusItem: NSStatusItem?
-    private var panel: MainPanel?
-    private var outsideClickMonitor: Any?
-    /// When the panel was last hidden. Pressing the menu bar icon takes focus from the panel and
-    /// hides it before the icon's action runs on mouse-up, so that click must not reopen it.
-    private var lastHide = Date.distantPast
+    private var window: MainWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -34,14 +37,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.start()
     }
 
-    /// Left click toggles the panel; right click (or Ctrl-click) shows a small menu.
+    /// Left click brings the window to the front; right click (or Ctrl-click) shows a small menu.
     @objc private func statusItemClicked() {
         let event = NSApp.currentEvent
         if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
             showStatusMenu()
         } else {
-            togglePanel()
+            showWindow()
         }
+    }
+
+    /// Clicking the Dock icon brings the window back.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showWindow()
+        return false
     }
 
     private func showStatusMenu() {
@@ -82,95 +91,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { await model.fetch(group: group) }
     }
 
-    @objc private func togglePanel() {
-        if let panel, panel.isVisible {
-            hidePanel()
-        } else if Date.now.timeIntervalSince(lastHide) > 0.5 {
-            showPanel()
-        }
-    }
-
-    private func showPanel() {
-        let panel = self.panel ?? makePanel()
-        self.panel = panel
-        // Center on the screen that holds the menu bar icon (falls back to the main screen).
-        let screen = statusItem?.button?.window?.screen ?? NSScreen.main
-        if let visible = screen?.visibleFrame {
-            // A size saved on a larger display is shrunk to fit this one.
-            if panel.frame.width > visible.width || panel.frame.height > visible.height {
-                panel.setFrame(NSRect(origin: panel.frame.origin, size: NSSize(
-                    width: min(panel.frame.width, visible.width),
-                    height: min(panel.frame.height, visible.height)
-                )), display: false)
-            }
-            let size = panel.frame.size
-            panel.setFrameOrigin(NSPoint(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2))
-        }
+    func showWindow() {
+        let window = self.window ?? makeWindow()
+        self.window = window
+        // A regular app while the window is open, so it is in the Dock and Cmd-Tab.
+        NSApp.setActivationPolicy(.regular)
+        NSApp.unhide(nil)
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        // Raised even if macOS declines the activation request (it may, for a click in the menu bar).
+        window.orderFrontRegardless()
+        window.makeKey()
         NSApp.activate()
-        panel.makeKeyAndOrderFront(nil)
-        startOutsideClickMonitor()
     }
 
-    private func hidePanel() {
-        if panel?.isVisible == true { lastHide = .now }
-        panel?.orderOut(nil)
-        if let monitor = outsideClickMonitor {
-            NSEvent.removeMonitor(monitor)
-            outsideClickMonitor = nil
-        }
+    func showSettings() {
+        showWindow()
+        model.pane = .settings
     }
 
-    /// Clicks in other apps (or on the desktop) close the panel. Global monitors only see events
-    /// sent to other applications, so clicks inside our own windows never trigger this.
-    private func startOutsideClickMonitor() {
-        guard outsideClickMonitor == nil else { return }
-        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
-            MainActor.assumeIsolated { self?.hideUnlessBusy() }
-        }
+    /// Back to a menu bar app; hiding hands focus to the app that was in front before.
+    private func windowDidClose() {
+        NSApp.setActivationPolicy(.accessory)
+        NSApp.hide(nil)
     }
 
-    /// Hides the panel unless a modal (folder picker) or sheet launched from it is up.
-    private func hideUnlessBusy() {
-        guard let panel, panel.isVisible, NSApp.modalWindow == nil, panel.attachedSheet == nil,
-              !(NSApp.keyWindow is NSSavePanel) else { return }  // includes NSOpenPanel
-        hidePanel()
-    }
-
-    private func makePanel() -> MainPanel {
-        let host = NSHostingController(rootView: PopoverRoot().environment(model))
+    private func makeWindow() -> MainWindow {
+        let host = NSHostingController(rootView: MainView().environment(model))
         // Only the minimum comes from SwiftUI; the user sets the size by resizing.
         host.sizingOptions = [.minSize]
-        let panel = MainPanel(contentViewController: host)
-        panel.styleMask = [.titled, .fullSizeContentView, .closable, .resizable]
-        panel.setContentSize(MainPanel.savedSize)
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
-        panel.isMovableByWindowBackground = true
-        panel.level = .floating
-        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
-        panel.isReleasedWhenClosed = false
-        panel.hidesOnDeactivate = false
-        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            panel.standardWindowButton(button)?.isHidden = true
+        let window = MainWindow(contentViewController: host)
+        window.restoreFrame(on: statusItem?.button?.window?.screen ?? NSScreen.main)
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.windowDidClose() }
         }
-        // Also hide when focus moves elsewhere (e.g. Cmd-Tab), like a popover.
-        let observed: [(Notification.Name, AnyObject?)] = [
-            (NSWindow.didResignKeyNotification, panel),
-            (NSApplication.didResignActiveNotification, nil),
-        ]
-        for (name, object) in observed {
-            NotificationCenter.default.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
-                // Deferred so a folder picker opened from the panel is already key when we check.
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard let self, let panel = self.panel, !panel.isKeyWindow || !NSApp.isActive else { return }
-                        self.hideUnlessBusy()
-                    }
-                }
-            }
-        }
-        panel.onClose = { [weak self] in self?.hidePanel() }
-        return panel
+        return window
     }
 
     /// Menu bar icon: a warning on errors, otherwise the Grove tree with the count of repos behind.
@@ -192,45 +146,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Floating panel that can become key (for text fields) and closes on Esc.
-/// Its size is remembered across launches.
-final class MainPanel: NSPanel {
-    var onClose: (() -> Void)?
-
+/// The main window. Closing it only hides it; its position and size are remembered across launches.
+final class MainWindow: NSWindow {
     static let defaultSize = NSSize(width: 1020, height: 660)
     static let minimumSize = NSSize(width: 860, height: 480)
-    private static let sizeKey = "PanelContentSize"
-
-    /// The last size the user resized to, or the default.
-    static var savedSize: NSSize {
-        guard let string = UserDefaults.standard.string(forKey: sizeKey) else { return defaultSize }
-        let size = NSSizeFromString(string)
-        return NSSize(width: max(size.width, minimumSize.width), height: max(size.height, minimumSize.height))
-    }
+    private static let autosaveName = "MainWindow"
+    /// Content size saved by versions that used a floating panel.
+    private static let legacySizeKey = "PanelContentSize"
 
     convenience init(contentViewController: NSViewController) {
-        self.init(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
+        self.init(contentRect: .zero, styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                  backing: .buffered, defer: false)
         self.contentViewController = contentViewController
-        NotificationCenter.default.addObserver(forName: NSWindow.didEndLiveResizeNotification, object: self, queue: .main) { note in
-            guard let panel = note.object as? NSWindow else { return }
-            let size = panel.contentRect(forFrameRect: panel.frame).size
-            UserDefaults.standard.set(NSStringFromSize(size), forKey: Self.sizeKey)
+        titleVisibility = .hidden
+        titlebarAppearsTransparent = true
+        isMovableByWindowBackground = true
+        collectionBehavior = [.moveToActiveSpace]
+        isReleasedWhenClosed = false
+    }
+
+    /// The saved frame, or the default (or legacy) size centered on `screen` on first launch.
+    func restoreFrame(on screen: NSScreen?) {
+        if !setFrameUsingName(Self.autosaveName) {
+            var size = Self.defaultSize
+            if let string = UserDefaults.standard.string(forKey: Self.legacySizeKey) {
+                let saved = NSSizeFromString(string)
+                size = NSSize(width: max(saved.width, Self.minimumSize.width), height: max(saved.height, Self.minimumSize.height))
+            }
+            setContentSize(size)
+            if let visible = screen?.visibleFrame {
+                setFrameOrigin(NSPoint(x: visible.midX - frame.width / 2, y: visible.midY - frame.height / 2))
+            }
         }
+        // A frame saved on a larger display is shrunk to fit this one.
+        if let visible = (self.screen ?? screen)?.visibleFrame,
+           frame.width > visible.width || frame.height > visible.height {
+            setFrame(frame.intersection(visible), display: false)
+        }
+        setFrameAutosaveName(Self.autosaveName)
     }
 
     /// Back to the default size, kept centered on the current position.
     func resetSize() {
-        UserDefaults.standard.removeObject(forKey: Self.sizeKey)
         let center = NSPoint(x: frame.midX, y: frame.midY)
         setContentSize(Self.defaultSize)
         setFrameOrigin(NSPoint(x: center.x - frame.width / 2, y: center.y - frame.height / 2))
-    }
-
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
-
-    override func cancelOperation(_ sender: Any?) {
-        onClose?()
     }
 }
 
