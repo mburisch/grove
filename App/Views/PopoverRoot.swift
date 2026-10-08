@@ -28,7 +28,8 @@ struct PopoverRoot: View {
                 }
             }
         }
-        .frame(width: 1020, height: 660)
+        .frame(minWidth: MainPanel.minimumSize.width, maxWidth: .infinity,
+               minHeight: MainPanel.minimumSize.height, maxHeight: .infinity)
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             // Popover opened: refresh local status if it's a bit stale (local only, no network).
             Task { await model.refreshAll(ifOlderThan: 60) }

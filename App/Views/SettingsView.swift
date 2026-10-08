@@ -162,6 +162,9 @@ struct SettingsView: View {
                 if let loginError {
                     Text(loginError).font(.caption).foregroundStyle(.red)
                 }
+                Button("Reset Window Size") {
+                    NSApp.windows.compactMap { $0 as? MainPanel }.first?.resetSize()
+                }
             }
         }
         .formStyle(.grouped)

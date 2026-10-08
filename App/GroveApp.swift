@@ -96,6 +96,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Center on the screen that holds the menu bar icon (falls back to the main screen).
         let screen = statusItem?.button?.window?.screen ?? NSScreen.main
         if let visible = screen?.visibleFrame {
+            // A size saved on a larger display is shrunk to fit this one.
+            if panel.frame.width > visible.width || panel.frame.height > visible.height {
+                panel.setFrame(NSRect(origin: panel.frame.origin, size: NSSize(
+                    width: min(panel.frame.width, visible.width),
+                    height: min(panel.frame.height, visible.height)
+                )), display: false)
+            }
             let size = panel.frame.size
             panel.setFrameOrigin(NSPoint(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2))
         }
@@ -131,8 +138,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func makePanel() -> MainPanel {
         let host = NSHostingController(rootView: PopoverRoot().environment(model))
+        // Only the minimum comes from SwiftUI; the user sets the size by resizing.
+        host.sizingOptions = [.minSize]
         let panel = MainPanel(contentViewController: host)
-        panel.styleMask = [.titled, .fullSizeContentView, .closable]
+        panel.styleMask = [.titled, .fullSizeContentView, .closable, .resizable]
+        panel.setContentSize(MainPanel.savedSize)
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.isMovableByWindowBackground = true
@@ -183,13 +193,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 /// Floating panel that can become key (for text fields) and closes on Esc.
+/// Its size is remembered across launches.
 final class MainPanel: NSPanel {
     var onClose: (() -> Void)?
+
+    static let defaultSize = NSSize(width: 1020, height: 660)
+    static let minimumSize = NSSize(width: 860, height: 480)
+    private static let sizeKey = "PanelContentSize"
+
+    /// The last size the user resized to, or the default.
+    static var savedSize: NSSize {
+        guard let string = UserDefaults.standard.string(forKey: sizeKey) else { return defaultSize }
+        let size = NSSizeFromString(string)
+        return NSSize(width: max(size.width, minimumSize.width), height: max(size.height, minimumSize.height))
+    }
 
     convenience init(contentViewController: NSViewController) {
         self.init(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
         self.contentViewController = contentViewController
-        setContentSize(contentViewController.view.fittingSize)
+        NotificationCenter.default.addObserver(forName: NSWindow.didEndLiveResizeNotification, object: self, queue: .main) { note in
+            guard let panel = note.object as? NSWindow else { return }
+            let size = panel.contentRect(forFrameRect: panel.frame).size
+            UserDefaults.standard.set(NSStringFromSize(size), forKey: Self.sizeKey)
+        }
+    }
+
+    /// Back to the default size, kept centered on the current position.
+    func resetSize() {
+        UserDefaults.standard.removeObject(forKey: Self.sizeKey)
+        let center = NSPoint(x: frame.midX, y: frame.midY)
+        setContentSize(Self.defaultSize)
+        setFrameOrigin(NSPoint(x: center.x - frame.width / 2, y: center.y - frame.height / 2))
     }
 
     override var canBecomeKey: Bool { true }
