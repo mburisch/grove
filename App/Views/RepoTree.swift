@@ -281,13 +281,18 @@ private struct RepoTreeRow: View {
                     // The name wins over the branch label when space runs out.
                     Text(repo.name).fontWeight(.semibold).lineLimit(1).layoutPriority(1).help(repo.name)
                     if let branch = main?.branch {
+                        // Orange only when the default branch is known and this is another one.
+                        let offPrimary = primary != nil && branch != primary
                         Text("(\(branch))")
-                            .foregroundStyle(branch == primary ? Color.secondary : Color.orange)
+                            .foregroundStyle(offPrimary ? Color.orange : Color.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .help(branch)
                     } else if let main {
                         Text("(\(main.head.prefix(7)))").foregroundStyle(.orange)
+                    }
+                    if main?.hasCommits == false {
+                        Text("no commits").font(.caption).foregroundStyle(.tertiary)
                     }
                     if let mode = repo.snapshot?.mode, mode != .full { ModeChip(mode: mode) }
                     AutoFetchChip(repo: repo)

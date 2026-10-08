@@ -120,6 +120,8 @@ public struct WorktreeInfo: Sendable, Hashable, Identifiable {
 
     public var id: String { path }
     public var url: URL { URL(fileURLWithPath: path) }
+    /// False in a fresh `git init` before the first commit, where HEAD is all zeros.
+    public var hasCommits: Bool { head.contains { $0 != "0" } }
 }
 
 public struct FileChange: Sendable, Hashable, Identifiable {

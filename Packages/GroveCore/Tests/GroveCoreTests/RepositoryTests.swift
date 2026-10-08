@@ -277,6 +277,17 @@ struct RepositoryTests {
         try await repo.fetch()
     }
 
+    @Test func emptyRepositoryHasNoCommitsAndNoPrimary() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        let dir = sb.root.appendingPathComponent("empty")
+        try await sb.git.run(["init", "-q", "-b", "main", dir.path])
+        let snap = try await GitRepository(url: dir, git: sb.git).snapshot()
+        #expect(snap.mainWorktree?.branch == "main")
+        #expect(snap.mainWorktree?.hasCommits == false)
+        #expect(snap.primaryBranch == nil)
+    }
+
     @Test func scanner() async throws {
         let sb = try await Sandbox()
         defer { sb.cleanup() }
