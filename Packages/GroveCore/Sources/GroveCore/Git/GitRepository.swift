@@ -301,7 +301,7 @@ public struct GitRepository: Sendable {
         if tracking.behind == 0 { return .upToDate }
         if tracking.ahead > 0 { return .skipped("diverged") }
         let upstreamSHA = try await git.output(["rev-parse", "--verify", "\(upstream)^{commit}"], in: url)
-        try await git.run(["update-ref", "-m", "gitit: fast-forward", "refs/heads/\(branch.name)", upstreamSHA, branch.commit.sha], in: url)
+        try await git.run(["update-ref", "-m", "grove: fast-forward", "refs/heads/\(branch.name)", upstreamSHA, branch.commit.sha], in: url)
         return .updated(commits: tracking.behind)
     }
 
@@ -463,7 +463,7 @@ public struct GitRepository: Sendable {
         try await expireReflogs()
         // `repack --filter` writes the filtered-out objects to a separate pack; send it to a scratch
         // directory and delete it.
-        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("gitit-filter-\(UUID().uuidString)")
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("grove-filter-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: scratch) }
         try await git.run(

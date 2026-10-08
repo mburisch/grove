@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Builds a Developer ID signed, notarized GitIt.app and zips it into dist/.
+# Builds a Developer ID signed, notarized Grove.app and zips it into dist/.
 #
 # One-time setup:
 #   1. Xcode > Settings > Accounts > Manage Certificates > + > Developer ID Application
@@ -19,18 +19,18 @@ ROOT="$PWD"
 BUILD="$ROOT/build/release"
 DIST="$ROOT/dist"
 VERSION=$(sed -n 's/^ *MARKETING_VERSION: *"\(.*\)"/\1/p' project.yml)
-ZIP="$DIST/GitIt-$VERSION.zip"
+ZIP="$DIST/Grove-$VERSION.zip"
 
 rm -rf "$BUILD" && mkdir -p "$BUILD" "$DIST"
 
 echo "==> Generating project"
 xcodegen generate --quiet
 
-echo "==> Archiving GitIt $VERSION"
+echo "==> Archiving Grove $VERSION"
 xcodebuild archive \
-  -project GitIt.xcodeproj -scheme GitIt -configuration Release \
+  -project Grove.xcodeproj -scheme Grove -configuration Release \
   -destination "generic/platform=macOS" \
-  -archivePath "$BUILD/GitIt.xcarchive" \
+  -archivePath "$BUILD/Grove.xcarchive" \
   -derivedDataPath "$BUILD/DerivedData" \
   CODE_SIGN_STYLE=Manual \
   CODE_SIGN_IDENTITY="Developer ID Application" \
@@ -38,14 +38,14 @@ xcodebuild archive \
   OTHER_CODE_SIGN_FLAGS="--timestamp" \
   -quiet
 
-APP="$BUILD/GitIt.app"
-ditto "$BUILD/GitIt.xcarchive/Products/Applications/GitIt.app" "$APP"
+APP="$BUILD/Grove.app"
+ditto "$BUILD/Grove.xcarchive/Products/Applications/Grove.app" "$APP"
 codesign --verify --deep --strict "$APP"
 
 if (( ! SKIP_NOTARIZE )); then
   echo "==> Notarizing"
-  ditto -c -k --keepParent "$APP" "$BUILD/GitIt-notarize.zip"
-  xcrun notarytool submit "$BUILD/GitIt-notarize.zip" \
+  ditto -c -k --keepParent "$APP" "$BUILD/Grove-notarize.zip"
+  xcrun notarytool submit "$BUILD/Grove-notarize.zip" \
     --keychain-profile "$NOTARY_PROFILE" --wait
   xcrun stapler staple "$APP"
   spctl --assess --type execute --verbose "$APP"

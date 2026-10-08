@@ -1,5 +1,5 @@
 import AppKit
-import GitItCore
+import GroveCore
 import SwiftUI
 
 /// Right-hand panel: details of the selected repository or worktree.

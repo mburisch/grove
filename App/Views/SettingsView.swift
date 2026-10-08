@@ -1,5 +1,5 @@
 import AppKit
-import GitItCore
+import GroveCore
 import ServiceManagement
 import SwiftUI
 

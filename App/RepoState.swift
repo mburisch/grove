@@ -1,5 +1,5 @@
 import Foundation
-import GitItCore
+import GroveCore
 import Observation
 
 /// UI state for one repository. Operations on a repository are serialized through `enqueue`.

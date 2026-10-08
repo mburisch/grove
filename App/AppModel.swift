@@ -1,5 +1,5 @@
 import AppKit
-import GitItCore
+import GroveCore
 import Network
 import Observation
 
@@ -513,7 +513,7 @@ final class AppModel {
                 if cameOnline { await self.fetchDue() }
             }
         }
-        monitor.start(queue: DispatchQueue(label: "gitit.network"))
+        monitor.start(queue: DispatchQueue(label: "grove.network"))
         pathMonitor = monitor
     }
 

@@ -1,4 +1,4 @@
-import GitItCore
+import GroveCore
 import SwiftUI
 
 /// "↓3 ↑1" style counts; shows a check when in sync.

@@ -1,5 +1,5 @@
 import AppKit
-import GitItCore
+import GroveCore
 import SwiftUI
 
 struct CloneView: View {

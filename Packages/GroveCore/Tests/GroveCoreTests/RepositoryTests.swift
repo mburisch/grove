@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import GitItCore
+@testable import GroveCore
 
 /// A bare "remote" plus a working clone used to publish commits to it, all in a temp directory.
 struct Sandbox {
@@ -14,7 +14,7 @@ struct Sandbox {
     init() async throws {
         // Resolve /var -> /private/var so paths match what git reports.
         let tmp = URL(fileURLWithPath: realpath(FileManager.default.temporaryDirectory.path, nil).map { String(cString: $0) } ?? "/tmp")
-        root = tmp.appendingPathComponent("gitit-tests-\(UUID().uuidString)")
+        root = tmp.appendingPathComponent("grove-tests-\(UUID().uuidString)")
         remote = root.appendingPathComponent("remote.git")
         publisher = root.appendingPathComponent("publisher")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

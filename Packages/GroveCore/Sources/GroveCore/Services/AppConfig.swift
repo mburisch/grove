@@ -121,7 +121,7 @@ public struct ConfigStore: Sendable {
             self.fileURL = fileURL
         } else {
             let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            self.fileURL = support.appendingPathComponent("GitIt/config.json")
+            self.fileURL = support.appendingPathComponent("Grove/config.json")
         }
     }
 

@@ -1,5 +1,5 @@
 import AppKit
-import GitItCore
+import GroveCore
 import SwiftUI
 
 struct PopoverRoot: View {
@@ -69,7 +69,7 @@ private struct HeaderBar: View {
             Image(systemName: "arrow.triangle.branch")
                 .font(.title3)
                 .foregroundStyle(.tint)
-            Text("GitIt").font(.headline)
+            Text("Grove").font(.headline)
 
             TextField("Filter", text: $model.filter)
                 .textFieldStyle(.roundedBorder)
@@ -119,7 +119,7 @@ private struct HeaderBar: View {
             Button { NSApp.terminate(nil) } label: {
                 Image(systemName: "power")
             }
-            .help("Quit GitIt")
+            .help("Quit Grove")
         }
         .buttonStyle(.borderless)
         .padding(.horizontal, 12)

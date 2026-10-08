@@ -1,9 +1,9 @@
 import AppKit
-import GitItCore
+import GroveCore
 import SwiftUI
 
 @main
-struct GitItApp: App {
+struct GroveApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
@@ -66,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit GitIt", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit Grove", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
     }
 
@@ -164,7 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         withObservationTracking {
             guard let button = statusItem?.button else { return }
             let symbol = model.hasErrors ? "exclamationmark.triangle" : "arrow.triangle.branch"
-            let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "GitIt")
+            let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Grove")
             image?.isTemplate = true
             button.image = image
             let behind = model.behindTotal

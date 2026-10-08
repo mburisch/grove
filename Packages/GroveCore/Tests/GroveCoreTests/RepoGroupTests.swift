@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import GitItCore
+@testable import GroveCore
 
 struct RepoGroupTests {
     let paths = ["/a", "/b", "/c", "/d"]

@@ -1,5 +1,5 @@
 import AppKit
-import GitItCore
+import GroveCore
 import SwiftUI
 
 /// Column widths shared by repo and worktree rows so paths and status line up.
@@ -85,15 +85,15 @@ enum DragItem {
 
     var payload: String {
         switch self {
-        case .repo(let path): "gitit-repo:" + path
-        case .group(let id): "gitit-group:" + id.uuidString
+        case .repo(let path): "grove-repo:" + path
+        case .group(let id): "grove-group:" + id.uuidString
         }
     }
 
     init?(payload: String) {
-        if payload.hasPrefix("gitit-repo:") {
-            self = .repo(String(payload.dropFirst("gitit-repo:".count)))
-        } else if payload.hasPrefix("gitit-group:"), let id = UUID(uuidString: String(payload.dropFirst("gitit-group:".count))) {
+        if payload.hasPrefix("grove-repo:") {
+            self = .repo(String(payload.dropFirst("grove-repo:".count)))
+        } else if payload.hasPrefix("grove-group:"), let id = UUID(uuidString: String(payload.dropFirst("grove-group:".count))) {
             self = .group(id)
         } else {
             return nil
