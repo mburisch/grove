@@ -19,8 +19,8 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: Grove
-        CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSUIElement: true
     settings:
       base:

@@ -18,6 +18,12 @@ Grove runs the `git` command-line tool, so authentication works the same as in y
 - macOS 27 or later
 - git, from the Xcode Command Line Tools or Homebrew
 
+## Install
+
+```sh
+brew install --cask mburisch/tap/grove
+```
+
 ## Building from source
 
 Requires Xcode and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`).
@@ -39,7 +45,12 @@ swift test --package-path Packages/GroveCore
 
 ## Releasing
 
-`scripts/release.sh` builds a Developer ID signed and notarized `Grove.app` and zips it into `dist/`. See the comment at the top of the script for the one-time certificate and notarization setup.
+1. Bump `MARKETING_VERSION` in `project.yml`, commit, and push to `main`.
+2. Run `scripts/release.sh`.
+
+The script tags `v<version>` and stops if that tag already exists. It then builds from a clean checkout of the tag, signs with Developer ID, and notarizes. Finally it publishes the GitHub release and updates the cask in [mburisch/homebrew-tap](https://github.com/mburisch/homebrew-tap).
+
+To build and notarize without tagging or publishing, use `scripts/release.sh --dry-run`. The one-time setup is described at the top of the script.
 
 ## License
 
