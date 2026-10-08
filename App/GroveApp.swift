@@ -20,6 +20,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var panel: MainPanel?
     private var outsideClickMonitor: Any?
+    /// When the panel was last hidden. Pressing the menu bar icon takes focus from the panel and
+    /// hides it before the icon's action runs on mouse-up, so that click must not reopen it.
+    private var lastHide = Date.distantPast
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -82,7 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func togglePanel() {
         if let panel, panel.isVisible {
             hidePanel()
-        } else {
+        } else if Date.now.timeIntervalSince(lastHide) > 0.5 {
             showPanel()
         }
     }
@@ -102,6 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func hidePanel() {
+        if panel?.isVisible == true { lastHide = .now }
         panel?.orderOut(nil)
         if let monitor = outsideClickMonitor {
             NSEvent.removeMonitor(monitor)
