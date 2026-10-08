@@ -76,4 +76,21 @@ public extension AppConfig {
         for i in groups.indices { groups[i].repos.removeAll { $0 == path } }
         ungroupedOrder.removeAll { $0 == path }
     }
+
+    /// Repository paths the config still remembers (added, hidden, grouped, ordered or with
+    /// settings) whose folders no longer exist, sorted. Kept until forgotten so a repo on an
+    /// unmounted drive comes back with its group and settings.
+    func missingRepositories(exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> [String] {
+        let remembered = repositories + excluded + Array(repoSettings.keys)
+            + groups.flatMap(\.repos) + ungroupedOrder
+        return Set(remembered).filter { !exists($0) }.sorted()
+    }
+
+    /// Removes every trace of a repository path from the config.
+    mutating func forget(repository path: String) {
+        repositories.removeAll { $0 == path }
+        excluded.removeAll { $0 == path }
+        repoSettings[path] = nil
+        forgetOrdering(of: path)
+    }
 }

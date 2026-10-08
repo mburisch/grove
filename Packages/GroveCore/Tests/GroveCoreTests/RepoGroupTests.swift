@@ -14,6 +14,24 @@ struct RepoGroupTests {
         #expect(sections.map(\.repos) == [["/c", "/a"], [], ["/d", "/b"]])
     }
 
+    @Test func missingRepositoriesAreFoundAndForgotten() {
+        var config = AppConfig()
+        config.repositories = ["/a", "/gone1"]
+        config.excluded = ["/gone2"]
+        config.repoSettings = ["/gone3": RepoSettings(fetchIntervalMinutes: 5), "/b": RepoSettings()]
+        config.groups = [RepoGroup(name: "Apps", repos: ["/gone1", "/c"])]
+        config.ungroupedOrder = ["/gone4", "/d"]
+        let exists = { (path: String) in paths.contains(path) }
+        #expect(config.missingRepositories(exists: exists) == ["/gone1", "/gone2", "/gone3", "/gone4"])
+
+        for path in config.missingRepositories(exists: exists) { config.forget(repository: path) }
+        #expect(config.missingRepositories(exists: exists).isEmpty)
+        #expect(config.repositories == ["/a"])
+        #expect(config.repoSettings.keys.sorted() == ["/b"])
+        #expect(config.groups[0].repos == ["/c"])
+        #expect(config.ungroupedOrder == ["/d"])
+    }
+
     @Test func moveBetweenGroupsAndReorder() {
         var config = AppConfig()
         let apps = RepoGroup(name: "Apps")

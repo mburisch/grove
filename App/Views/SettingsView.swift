@@ -75,6 +75,26 @@ struct SettingsView: View {
                 }
             }
 
+            let missing = model.config.missingRepositories()
+            if !missing.isEmpty {
+                Section {
+                    ForEach(missing, id: \.self) { path in
+                        HStack {
+                            Text(path.abbreviatingWithTilde)
+                            Spacer()
+                            Button("Forget") { forget([path]) }
+                        }
+                    }
+                    Button("Forget All") { forget(missing) }
+                } header: {
+                    Text("Missing Repositories")
+                } footer: {
+                    Text("These folders no longer exist. Grove keeps their group and settings in case they come back, e.g. from an unmounted drive. Forget removes them from the settings; nothing on disk is touched.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Section("Clone") {
                 HStack {
                     TextField("Clone into", text: $model.config.cloneRoot)
@@ -148,6 +168,11 @@ struct SettingsView: View {
         .task(id: model.config.gitPath) {
             gitVersion = try? await model.git.output(["--version"], in: URL(fileURLWithPath: NSHomeDirectory()))
         }
+    }
+
+    private func forget(_ paths: [String]) {
+        for path in paths { model.config.forget(repository: path) }
+        Task { await model.rebuildRepoList() }
     }
 
     private func remove(root: ScanRoot) {
