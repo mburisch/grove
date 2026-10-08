@@ -43,9 +43,12 @@ public struct GitResult: Sendable {
 /// Runs the git CLI. Stateless and safe to share; each call spawns its own process.
 public struct GitRunner: Sendable {
     public var gitPath: String
+    /// Shared cap on concurrent git processes; nil runs without a limit.
+    public var limiter: GitLimiter?
 
-    public init(gitPath: String = GitRunner.defaultGitPath) {
+    public init(gitPath: String = GitRunner.defaultGitPath, limiter: GitLimiter? = nil) {
         self.gitPath = gitPath
+        self.limiter = limiter
     }
 
     public static var defaultGitPath: String {
@@ -79,6 +82,23 @@ public struct GitRunner: Sendable {
         check: Bool = true,
         input: Data? = nil,
         onStderr: (@Sendable (String) -> Void)? = nil
+    ) async throws -> GitResult {
+        guard let limiter else {
+            return try await launch(arguments, in: directory, timeout: timeout, check: check, input: input, onStderr: onStderr)
+        }
+        // The timeout starts once a slot is free, so waiting in the queue never times a run out.
+        return try await limiter.withSlot {
+            try await launch(arguments, in: directory, timeout: timeout, check: check, input: input, onStderr: onStderr)
+        }
+    }
+
+    private func launch(
+        _ arguments: [String],
+        in directory: URL?,
+        timeout: Duration,
+        check: Bool,
+        input: Data?,
+        onStderr: (@Sendable (String) -> Void)?
     ) async throws -> GitResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: gitPath)

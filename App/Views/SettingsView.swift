@@ -157,6 +157,12 @@ struct SettingsView: View {
                     TextField("git binary", text: $model.config.gitPath, prompt: Text(GitRunner.defaultGitPath))
                     if let gitVersion { Text(gitVersion).font(.caption).foregroundStyle(.secondary) }
                 }
+                Stepper(value: $model.config.maxParallelGitRuns, in: 1...16) {
+                    LabeledContent("Parallel git commands", value: "\(model.config.maxParallelGitRuns)")
+                }
+                Text("Fetches and status checks beyond this wait their turn. Lower it if git is slow or errors under load.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Toggle("Launch at Login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, enabled in setLaunchAtLogin(enabled) }
                 if let loginError {

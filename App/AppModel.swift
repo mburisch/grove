@@ -16,7 +16,11 @@ enum Pane: Hashable {
 @MainActor @Observable
 final class AppModel {
     var config: AppConfig {
-        didSet { if config != oldValue { persist() } }
+        didSet {
+            guard config != oldValue else { return }
+            gitLimiter.setLimit(config.maxParallelGitRuns)
+            persist()
+        }
     }
     private(set) var repos: [RepoState] = []
     var pane: Pane?
@@ -39,12 +43,20 @@ final class AppModel {
     @ObservationIgnored private var started = false
     @ObservationIgnored private var lastScan: Date = .distantPast
 
+    /// Shared by every runner so the cap holds across repos and operations.
+    @ObservationIgnored private let gitLimiter: GitLimiter
+
     init() {
-        config = store.load()
+        let config = store.load()
+        gitLimiter = GitLimiter(limit: config.maxParallelGitRuns)
+        self.config = config
     }
 
     var git: GitRunner {
-        GitRunner(gitPath: config.gitPath.isEmpty ? GitRunner.defaultGitPath : config.gitPath.expandingTilde)
+        GitRunner(
+            gitPath: config.gitPath.isEmpty ? GitRunner.defaultGitPath : config.gitPath.expandingTilde,
+            limiter: gitLimiter
+        )
     }
 
     func repository(_ repo: RepoState) -> GitRepository {

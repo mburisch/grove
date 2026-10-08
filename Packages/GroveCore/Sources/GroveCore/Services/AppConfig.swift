@@ -77,6 +77,8 @@ public struct AppConfig: Codable, Sendable, Hashable {
     /// 0 = automatic fetching off.
     public var defaultFetchIntervalMinutes: Int = 0
     public var gitPath: String = ""
+    /// Most git processes Grove runs at once.
+    public var maxParallelGitRuns: Int = GitLimiter.defaultLimit
     public var launchers: [Launcher] = Launcher.defaults
     public var pauseFetchInLowPowerMode: Bool = true
     /// Repo list sections, in order.
@@ -97,6 +99,7 @@ public struct AppConfig: Codable, Sendable, Hashable {
         cloneRoot = try c.decodeIfPresent(String.self, forKey: .cloneRoot) ?? d.cloneRoot
         defaultFetchIntervalMinutes = try c.decodeIfPresent(Int.self, forKey: .defaultFetchIntervalMinutes) ?? d.defaultFetchIntervalMinutes
         gitPath = try c.decodeIfPresent(String.self, forKey: .gitPath) ?? d.gitPath
+        maxParallelGitRuns = try c.decodeIfPresent(Int.self, forKey: .maxParallelGitRuns) ?? d.maxParallelGitRuns
         launchers = try c.decodeIfPresent([Launcher].self, forKey: .launchers) ?? d.launchers
         pauseFetchInLowPowerMode = try c.decodeIfPresent(Bool.self, forKey: .pauseFetchInLowPowerMode) ?? d.pauseFetchInLowPowerMode
         groups = try c.decodeIfPresent([RepoGroup].self, forKey: .groups) ?? d.groups
