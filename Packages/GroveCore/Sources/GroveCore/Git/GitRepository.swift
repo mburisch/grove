@@ -63,6 +63,7 @@ public struct GitRepository: Sendable {
                 upstreamGone: ref.track == "gone",
                 tracking: ref.upstream == nil ? nil : GitParsers.parseTrack(ref.track),
                 versusPrimary: nil,
+                committedDiff: nil,
                 worktreePath: ref.worktreePath
             )
         }
@@ -86,9 +87,14 @@ public struct GitRepository: Sendable {
             let localTargets = branches.prefix(maxComparisons).map { "refs/heads/\($0.name)" }
             let remoteTargets = remoteBranches.prefix(max(0, maxComparisons - localTargets.count))
                 .map { "\(remotePrefix)\($0.name)" }
-            let counts = await compare(localTargets + remoteTargets, to: compareTarget)
+            // Branches without a worktree also get a diff stat, like worktrees have.
+            let diffTargets = Set(branches.prefix(maxComparisons).filter { $0.worktreePath == nil }
+                .map { "refs/heads/\($0.name)" })
+            let (counts, diffs) = await compare(localTargets + remoteTargets, to: compareTarget, diffing: diffTargets)
             for i in branches.indices {
-                branches[i].versusPrimary = counts["refs/heads/\(branches[i].name)"]
+                let ref = "refs/heads/\(branches[i].name)"
+                branches[i].versusPrimary = counts[ref]
+                branches[i].committedDiff = diffs[ref]
             }
             for i in remoteBranches.indices {
                 remoteBranches[i].versusPrimary = counts["\(remotePrefix)\(remoteBranches[i].name)"]
@@ -183,24 +189,30 @@ public struct GitRepository: Sendable {
         return info
     }
 
-    private func compare(_ refs: [String], to target: String) async -> [String: AheadBehind] {
-        await withTaskGroup(of: (String, AheadBehind?).self) { group in
+    /// Ahead/behind of each ref vs `target`, plus a diff stat since the fork point for the refs in `diffing`.
+    private func compare(_ refs: [String], to target: String, diffing: Set<String> = []) async
+        -> (counts: [String: AheadBehind], diffs: [String: DiffStat]) {
+        await withTaskGroup(of: (String, AheadBehind?, DiffStat?).self) { group in
             // Bounded fan-out so a repo with many branches doesn't spawn dozens of processes at once.
             var iterator = refs.makeIterator()
             func addNext() {
                 guard let ref = iterator.next() else { return }
                 group.addTask {
-                    let out = await git.outputIfSuccess(["rev-list", "--left-right", "--count", "\(ref)...\(target)"], in: url)
-                    return (ref, out.flatMap(GitParsers.parseLeftRight))
+                    async let out = git.outputIfSuccess(["rev-list", "--left-right", "--count", "\(ref)...\(target)"], in: url)
+                    async let diff: String? = diffing.contains(ref)
+                        ? git.outputIfSuccess(["diff", "--shortstat", "\(target)...\(ref)"], in: url) : nil
+                    return (ref, await out.flatMap(GitParsers.parseLeftRight), await diff.map(GitParsers.parseShortStat))
                 }
             }
             for _ in 0..<8 { addNext() }
-            var result: [String: AheadBehind] = [:]
-            for await (ref, counts) in group {
-                if let counts { result[ref] = counts }
+            var counts: [String: AheadBehind] = [:]
+            var diffs: [String: DiffStat] = [:]
+            for await (ref, count, diff) in group {
+                if let count { counts[ref] = count }
+                if let diff { diffs[ref] = diff }
                 addNext()
             }
-            return result
+            return (counts, diffs)
         }
     }
 
@@ -226,6 +238,25 @@ public struct GitRepository: Sendable {
         )
     }
 
+    /// Commits and changed files of a local branch that has no worktree, vs `primaryRef`.
+    /// There is no working tree, so `uncommitted` is always empty.
+    public func branchDetails(name: String, primaryRef: String?, maxCommits: Int = 50) async -> WorktreeDetails {
+        let ref = "refs/heads/\(name)"
+        async let head = git.outputIfSuccess(["log", "-1", "--format=\(GitParsers.logFormat)", ref], in: url)
+        async let ahead = outputIf(primaryRef.map {
+            ["log", "-n", String(maxCommits), "--format=\(GitParsers.logFormat)", "\($0)..\(ref)"]
+        }, in: url)
+        async let sinceBase: [FileChange] = if let primaryRef {
+            fileChanges(between: ["\(primaryRef)...\(ref)"], in: url)
+        } else { [] }
+        return WorktreeDetails(
+            head: GitParsers.parseLog(await head ?? "").first,
+            uncommitted: [],
+            commitsAhead: GitParsers.parseLog(await ahead ?? ""),
+            changedSinceBase: await sinceBase
+        )
+    }
+
     /// Working tree vs the merge base of HEAD and the primary branch.
     private func changesSinceBase(primaryRef: String?, in wt: URL) async -> [FileChange] {
         guard let primaryRef,
@@ -235,8 +266,13 @@ public struct GitRepository: Sendable {
 
     /// Working tree (including staged changes) vs `rev`.
     private func fileChanges(against rev: String, in wt: URL) async -> [FileChange] {
-        async let numstat = git.outputIfSuccess(["diff", "--numstat", "-z", "-M", rev], in: wt)
-        async let nameStatus = git.outputIfSuccess(["diff", "--name-status", "-z", "-M", rev], in: wt)
+        await fileChanges(between: [rev], in: wt)
+    }
+
+    /// `git diff` of `revs`: one rev compares the working tree, `a...b` compares commits.
+    private func fileChanges(between revs: [String], in dir: URL) async -> [FileChange] {
+        async let numstat = git.outputIfSuccess(["diff", "--numstat", "-z", "-M"] + revs, in: dir)
+        async let nameStatus = git.outputIfSuccess(["diff", "--name-status", "-z", "-M"] + revs, in: dir)
         return GitParsers.parseFileChanges(numstat: await numstat ?? "", nameStatus: await nameStatus ?? "")
     }
 

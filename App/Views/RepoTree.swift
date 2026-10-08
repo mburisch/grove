@@ -86,6 +86,8 @@ struct RepoTree: View {
                 if model.branchesExpanded.contains(repo.path) {
                     ForEach(free) { branch in
                         BranchTreeRow(repo: repo, branch: branch)
+                            .tag(Pane.branch(repo: repo.path, name: branch.name))
+                            .contextMenu { BranchContextMenu(repo: repo, branch: branch) }
                             .modifier(RepoDropTarget(group: group, before: next))
                     }
                 }
@@ -437,30 +439,42 @@ private struct BranchTreeRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            HStack(spacing: 6) {
-                Text(branch.name)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .layoutPriority(1)
-                    .help(branch.name)
-                upstream
-                    .font(.caption)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+            Color.clear.frame(width: 12)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(branch.name)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(branch.name)
+                }
+                // Where a worktree row shows its folder: the upstream and the last commit's age.
+                HStack(spacing: 4) {
+                    upstream.lineLimit(1).truncationMode(.middle)
+                    Text("· \(branch.commit.date.relative)").foregroundStyle(.tertiary).lineLimit(1).layoutPriority(1)
+                }
+                .font(.caption)
             }
-            .padding(.leading, 12 + 8 + Column.indent * 2)
+            .padding(.leading, Column.indent * 2)
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            AheadBehindBadge(value: branch.tracking, showSynced: false)
-                .frame(width: Column.status, alignment: .trailing)
+            HStack(spacing: 6) {
+                Spacer(minLength: 0)
+                if let diff = branch.committedDiff { CompactDiff(stat: diff) }
+                AheadBehindBadge(value: branch.tracking, showSynced: false)
+            }
+            .frame(width: Column.status, alignment: .trailing)
 
             HStack(spacing: 6) {
-                if let tracking = branch.tracking, tracking.behind > 0, tracking.ahead == 0 {
+                if let tracking = branch.tracking, tracking.behind > 0 {
                     IconButton("arrow.down.to.line", help: "Fast-forward to \(branch.upstream ?? "upstream")") {
                         Task { await model.fastForward(repo, branch: branch) }
                     }
-                    .disabled(repo.activity != nil)
+                    .disabled(tracking.ahead > 0 || repo.activity != nil)
                 }
+                WorktreeLaunchMenu(repo: repo, branch: branch.name)
             }
             .frame(width: Column.actions, alignment: .trailing)
         }
@@ -475,6 +489,58 @@ private struct BranchTreeRow: View {
         } else {
             Text("no upstream").foregroundStyle(.tertiary)
         }
+    }
+}
+
+/// Branch counterpart of `WorktreeContextMenu`.
+struct BranchContextMenu: View {
+    @Environment(AppModel.self) private var model
+    let repo: RepoState
+    let branch: BranchInfo
+
+    var body: some View {
+        Button("Create Worktree") { Task { await model.createWorktree(repo, branch: branch.name, openWith: nil) } }
+        ForEach(model.availableLaunchers) { launcher in
+            Button("Create Worktree & Open in \(launcher.name)") {
+                Task { await model.createWorktree(repo, branch: branch.name, openWith: launcher) }
+            }
+        }
+        if let tracking = branch.tracking, tracking.behind > 0, tracking.ahead == 0 {
+            Divider()
+            Button("Fast-Forward to \(branch.upstream ?? "Upstream")") {
+                Task { await model.fastForward(repo, branch: branch) }
+            }
+        }
+        Divider()
+        Button("Copy Branch Name") { copyToPasteboard(branch.name) }
+    }
+}
+
+/// For a branch without a worktree: create one next to the repo and open it.
+struct WorktreeLaunchMenu: View {
+    @Environment(AppModel.self) private var model
+    let repo: RepoState
+    let branch: String
+
+    var body: some View {
+        Menu {
+            ForEach(model.availableLaunchers) { launcher in
+                Button("Create Worktree & Open in \(launcher.name)") {
+                    Task { await model.createWorktree(repo, branch: branch, openWith: launcher) }
+                }
+            }
+            Divider()
+            Button("Create Worktree") {
+                Task { await model.createWorktree(repo, branch: branch, openWith: nil) }
+            }
+        } label: {
+            Image(systemName: "plus.rectangle.on.folder")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Create a worktree for \(branch)")
+        .disabled(repo.activity != nil)
     }
 }
 

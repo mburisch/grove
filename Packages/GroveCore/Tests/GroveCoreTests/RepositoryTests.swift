@@ -167,6 +167,29 @@ struct RepositoryTests {
         #expect(after.tracking == .zero)
     }
 
+    @Test func branchWithoutWorktreeHasDiffAndDetails() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        let repo = try await sb.clone("details", mode: .full)
+        try await sb.git.run(["checkout", "-q", "-b", "feature"], in: repo.url)
+        try await sb.commit(in: repo.url, file: "feature.txt", content: "one\ntwo\n")
+        try await sb.git.run(["checkout", "-q", "main"], in: repo.url)
+
+        let snap = try await repo.snapshot()
+        let feature = try #require(snap.branches.first { $0.name == "feature" })
+        #expect(feature.worktreePath == nil)
+        #expect(feature.versusPrimary == AheadBehind(ahead: 1, behind: 0))
+        #expect(feature.committedDiff == DiffStat(files: 1, insertions: 2, deletions: 0))
+        // Checked-out branches get their diff from the worktree instead.
+        #expect(snap.branches.first { $0.name == "main" }?.committedDiff == nil)
+
+        let details = await repo.branchDetails(name: "feature", primaryRef: snap.baseRef)
+        #expect(details.head?.subject == "change feature.txt")
+        #expect(details.commitsAhead.map(\.subject) == ["change feature.txt"])
+        #expect(details.changedSinceBase.map(\.path) == ["feature.txt"])
+        #expect(details.uncommitted.isEmpty)
+    }
+
     @Test func shallowCloneStaysShallowAcrossFetch() async throws {
         let sb = try await Sandbox()
         defer { sb.cleanup() }

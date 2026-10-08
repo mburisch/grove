@@ -83,6 +83,9 @@ public struct BranchInfo: Sendable, Hashable, Identifiable {
     public var tracking: AheadBehind?
     /// Ahead/behind relative to `origin/<primary>`; nil when not computed.
     public var versusPrimary: AheadBehind?
+    /// Committed changes since the branch forked from the primary branch. Only computed for
+    /// branches without a worktree (worktrees carry their own); nil when not computed.
+    public var committedDiff: DiffStat?
     /// Path of the worktree this branch is checked out in, if any.
     public var worktreePath: String?
 

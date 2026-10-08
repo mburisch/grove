@@ -2,7 +2,7 @@ import AppKit
 import GroveCore
 import SwiftUI
 
-/// Right-hand panel: details of the selected repository or worktree.
+/// Right-hand panel: details of the selected repository, worktree or branch.
 struct Inspector: View {
     @Environment(AppModel.self) private var model
 
@@ -21,6 +21,14 @@ struct Inspector: View {
             } else {
                 Placeholder()
             }
+        case .branch(let path, let name):
+            // Gone once it's checked out in a worktree or deleted.
+            if let repo = model.repo(at: path),
+               let branch = repo.snapshot?.branches.first(where: { $0.name == name && $0.worktreePath == nil }) {
+                ScrollView { BranchInspector(repo: repo, branch: branch).padding(14) }.id(AppModel.branchKey(path, name))
+            } else {
+                Placeholder()
+            }
         default:
             Placeholder()
         }
@@ -33,7 +41,7 @@ private struct Placeholder: View {
             Image(systemName: "sidebar.right")
                 .font(.largeTitle)
                 .foregroundStyle(.tertiary)
-            Text("Select a repository or worktree").foregroundStyle(.secondary)
+            Text("Select a repository, worktree or branch").foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -195,6 +203,126 @@ private struct WorktreeInspector: View {
     }
 }
 
+// MARK: - Branch
+
+/// A local branch without a worktree: the same summary and changes as a worktree, minus the working tree.
+private struct BranchInspector: View {
+    @Environment(AppModel.self) private var model
+    let repo: RepoState
+    let branch: BranchInfo
+
+    var body: some View {
+        let primary = repo.snapshot?.baseRef
+        let details = model.branchDetails[AppModel.branchKey(repo.path, branch.name)]
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline) {
+                    Image(systemName: "arrow.triangle.branch").foregroundStyle(.secondary)
+                    Text(branch.name)
+                        .font(.title3.weight(.semibold))
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+                    Spacer()
+                    if repo.activity != nil { ProgressView().controlSize(.small) }
+                }
+                Text("Branch of \(repo.name) — not checked out in a worktree")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            RepoBanners(repo: repo)
+
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 6) {
+                GridRow {
+                    Text("Upstream").foregroundStyle(.secondary)
+                    if branch.upstreamGone {
+                        Text("\(branch.upstream ?? "upstream") (gone)").foregroundStyle(.red)
+                    } else if let upstream = branch.upstream {
+                        HStack(spacing: 6) {
+                            Text(upstream)
+                            AheadBehindBadge(value: branch.tracking)
+                        }
+                    } else {
+                        Text("none").foregroundStyle(.tertiary)
+                    }
+                }
+                if let primary {
+                    GridRow {
+                        Text("vs primary").foregroundStyle(.secondary)
+                        HStack(spacing: 6) {
+                            Text(primary)
+                            AheadBehindBadge(value: branch.versusPrimary)
+                        }
+                    }
+                }
+                GridRow(alignment: .top) {
+                    Text("Last commit").foregroundStyle(.secondary)
+                    let head = details?.head ?? branch.commit
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(head.subject).lineLimit(2)
+                        Text("\(head.sha.prefix(8)) · \(head.author) · \(head.date.relative)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .font(.callout)
+
+            HStack(spacing: 8) {
+                if let tracking = branch.tracking, tracking.behind > 0 {
+                    Button { Task { await model.fastForward(repo, branch: branch) } } label: {
+                        Label("Fast-Forward", systemImage: "arrow.down.to.line")
+                    }
+                    .disabled(tracking.ahead > 0 || repo.activity != nil)
+                    .help(tracking.ahead > 0
+                          ? "Diverged from \(branch.upstream ?? "upstream"): \(tracking.ahead) local commits"
+                          : "Move \(branch.name) to \(branch.upstream ?? "upstream")")
+                }
+                Button { Task { await model.createWorktree(repo, branch: branch.name, openWith: nil) } } label: {
+                    Label("Create Worktree", systemImage: "plus.rectangle.on.folder")
+                }
+                .disabled(repo.activity != nil)
+                .help("Check out \(branch.name) in a new worktree next to the repository")
+                Button { copyToPasteboard(branch.name) } label: { Label("Copy Name", systemImage: "doc.on.doc") }
+            }
+            .controlSize(.small)
+
+            CreateWorktreeLauncherGrid(repo: repo, branch: branch.name)
+
+            WorktreeChanges(root: repo.path, details: details, primary: primary, aheadCount: branch.versusPrimary?.ahead,
+                            hasWorkingTree: false)
+        }
+    }
+}
+
+/// One "Create worktree & open" button per launcher, like `LauncherGrid` for a worktree.
+private struct CreateWorktreeLauncherGrid: View {
+    @Environment(AppModel.self) private var model
+    let repo: RepoState
+    let branch: String
+
+    var body: some View {
+        let launchers = model.availableLaunchers
+        if !launchers.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Create a worktree and open it in").font(.caption).foregroundStyle(.secondary)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 6)], alignment: .leading, spacing: 6) {
+                    ForEach(launchers) { launcher in
+                        Button { Task { await model.createWorktree(repo, branch: branch, openWith: launcher) } } label: {
+                            HStack(spacing: 5) {
+                                LauncherIcon(launcher: launcher)
+                                Text(launcher.name).lineLimit(1)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .controlSize(.small)
+                    }
+                }
+                .disabled(repo.activity != nil)
+            }
+        }
+    }
+}
+
 /// Tracking info, last commit, and actions for a worktree.
 private struct WorktreeSummary: View {
     @Environment(AppModel.self) private var model
@@ -300,20 +428,40 @@ private struct LauncherIcon: View {
 }
 
 /// Uncommitted files, commits not on primary, and files changed vs primary.
+/// For a branch without a worktree (`hasWorkingTree == false`) only the committed changes are shown,
+/// and files can't be opened because that version isn't on disk.
 private struct WorktreeChanges: View {
-    let worktree: WorktreeInfo
+    /// The worktree folder; for a branch, the repository.
+    let root: String
     let details: WorktreeDetails?
     let primary: String?
+    /// Commits ahead of primary when known (the list itself is capped).
+    let aheadCount: Int?
+    var hasWorkingTree = true
+
+    init(worktree: WorktreeInfo, details: WorktreeDetails?, primary: String?) {
+        self.init(root: worktree.path, details: details, primary: primary, aheadCount: worktree.versusPrimary?.ahead)
+    }
+
+    init(root: String, details: WorktreeDetails?, primary: String?, aheadCount: Int?, hasWorkingTree: Bool = true) {
+        self.root = root
+        self.details = details
+        self.primary = primary
+        self.aheadCount = aheadCount
+        self.hasWorkingTree = hasWorkingTree
+    }
 
     var body: some View {
         if let details {
             VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 4) {
-                    FileListHeader(title: "Uncommitted", files: details.uncommitted)
-                    if details.uncommitted.isEmpty {
-                        EmptyNote("No uncommitted changes")
-                    } else {
-                        FileTable(root: worktree.path, files: details.uncommitted)
+                if hasWorkingTree {
+                    VStack(alignment: .leading, spacing: 4) {
+                        FileListHeader(title: "Uncommitted", files: details.uncommitted)
+                        if details.uncommitted.isEmpty {
+                            EmptyNote("No uncommitted changes")
+                        } else {
+                            FileTable(root: root, files: details.uncommitted)
+                        }
                     }
                 }
                 if primary == nil {
@@ -325,19 +473,21 @@ private struct WorktreeChanges: View {
                 if let primary {
                     VStack(alignment: .leading, spacing: 4) {
                         FileListHeader(title: "Changed vs \(primary)", files: details.changedSinceBase)
-                        Text("Since this branch forked from \(primary), including uncommitted changes")
+                        Text(hasWorkingTree
+                             ? "Since this branch forked from \(primary), including uncommitted changes"
+                             : "Since this branch forked from \(primary)")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                         if details.changedSinceBase.isEmpty {
                             EmptyNote("No differences")
                         } else {
-                            FileTable(root: worktree.path, files: details.changedSinceBase)
+                            FileTable(root: root, files: details.changedSinceBase, canOpen: hasWorkingTree)
                         }
                     }
                 }
                 if let primary, !details.commitsAhead.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
-                        SectionTitle("Commits not on \(primary)", count: worktree.versusPrimary?.ahead ?? details.commitsAhead.count)
+                        SectionTitle("Commits not on \(primary)", count: aheadCount ?? details.commitsAhead.count)
                         ForEach(details.commitsAhead, id: \.sha) { commit in
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(commit.subject).lineLimit(1)
@@ -395,12 +545,14 @@ private struct FileTable: View {
     static let numberWidth: CGFloat = 46
     let root: String
     let files: [FileChange]
+    /// False when the files aren't on disk at this version (a branch without a worktree).
+    var canOpen = true
     private let limit = 300
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(files.prefix(limit)) { file in
-                FileRow(root: root, file: file)
+                FileRow(root: root, file: file, canOpen: canOpen)
             }
             if files.count > limit {
                 Text("… and \(files.count - limit) more").font(.caption).foregroundStyle(.secondary)
@@ -414,9 +566,11 @@ private struct FileRow: View {
     @Environment(AppModel.self) private var model
     let root: String
     let file: FileChange
+    let canOpen: Bool
     @State private var hovering = false
 
     private var absolutePath: String { (root as NSString).appendingPathComponent(file.path) }
+    private var openable: Bool { canOpen && !file.isDeleted }
 
     var body: some View {
         let editors = model.fileLaunchers
@@ -457,28 +611,30 @@ private struct FileRow: View {
             }
             .buttonStyle(.borderless)
             .help(editors.first.map { "Open in \($0.name)" } ?? "")
-            .opacity(hovering && !file.isDeleted && !editors.isEmpty ? 1 : 0)
-            .disabled(file.isDeleted || editors.isEmpty)
+            .opacity(hovering && openable && !editors.isEmpty ? 1 : 0)
+            .disabled(!openable || editors.isEmpty)
             .frame(width: 16)
         }
         .font(.caption.monospacedDigit())
         .padding(.vertical, 3)
         .padding(.horizontal, 4)
-        .background(hovering && !file.isDeleted ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 4))
+        .background(hovering && openable ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 4))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .help(helpText)
         .contextMenu {
-            ForEach(editors) { editor in
-                Button("Open in \(editor.name)") { model.open(absolutePath, with: editor) }
+            if canOpen {
+                ForEach(editors) { editor in
+                    Button("Open in \(editor.name)") { model.open(absolutePath, with: editor) }
+                }
+                .disabled(file.isDeleted)
+                Divider()
+                Button("Reveal in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: absolutePath)])
+                }
+                .disabled(file.isDeleted)
+                Button("Copy Path") { copyToPasteboard(absolutePath) }
             }
-            .disabled(file.isDeleted)
-            Divider()
-            Button("Reveal in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: absolutePath)])
-            }
-            .disabled(file.isDeleted)
-            Button("Copy Path") { copyToPasteboard(absolutePath) }
             Button("Copy Relative Path") { copyToPasteboard(file.path) }
         }
     }
@@ -585,17 +741,25 @@ private struct BranchRow: View {
             Image(systemName: isPrimary ? "star" : "arrow.triangle.branch")
                 .foregroundStyle(.secondary)
                 .frame(width: 14)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(branch.name).fontWeight(.medium).lineLimit(1)
-                    if branch.upstreamGone {
-                        Text("upstream gone").font(.caption).foregroundStyle(.orange)
-                    } else {
-                        AheadBehindBadge(value: branch.tracking, showSynced: false)
+            // Opens the branch's own page, like selecting it in the tree.
+            Button { model.select(.branch(repo: repo.path, name: branch.name)) } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(branch.name).fontWeight(.medium).lineLimit(1)
+                        if branch.upstreamGone {
+                            Text("upstream gone").font(.caption).foregroundStyle(.orange)
+                        } else {
+                            AheadBehindBadge(value: branch.tracking, showSynced: false)
+                        }
                     }
+                    CommitLine(commit: branch.commit)
                 }
-                CommitLine(commit: branch.commit)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .help("Show \(branch.name)")
+            .contextMenu { BranchContextMenu(repo: repo, branch: branch) }
             Spacer(minLength: 4)
             if let t = branch.tracking, t.behind > 0, t.ahead == 0 {
                 IconButton("arrow.down.to.line", help: "Fast-forward to \(branch.upstream ?? "upstream")") {
@@ -642,33 +806,5 @@ private struct CommitLine: View {
         }
         .font(.caption)
         .foregroundStyle(.secondary)
-    }
-}
-
-/// For a branch without a worktree: create one next to the repo and open it.
-private struct WorktreeLaunchMenu: View {
-    @Environment(AppModel.self) private var model
-    let repo: RepoState
-    let branch: String
-
-    var body: some View {
-        Menu {
-            ForEach(model.availableLaunchers) { launcher in
-                Button("Create Worktree & Open in \(launcher.name)") {
-                    Task { await model.createWorktree(repo, branch: branch, openWith: launcher) }
-                }
-            }
-            Divider()
-            Button("Create Worktree") {
-                Task { await model.createWorktree(repo, branch: branch, openWith: nil) }
-            }
-        } label: {
-            Image(systemName: "plus.rectangle.on.folder")
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Create a worktree for \(branch)")
-        .disabled(repo.activity != nil)
     }
 }

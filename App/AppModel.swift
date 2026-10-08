@@ -7,6 +7,8 @@ import Observation
 enum Pane: Hashable {
     case repo(String)
     case worktree(repo: String, path: String)
+    /// A local branch that isn't checked out in any worktree.
+    case branch(repo: String, name: String)
     case clone
     case settings
     case gitLog
@@ -37,6 +39,8 @@ final class AppModel {
     var draggingInTree = false
     /// Worktree details keyed by worktree path, loaded when a worktree is inspected.
     private(set) var details: [String: WorktreeDetails] = [:]
+    /// Details of branches without a worktree, keyed by `branchKey`, loaded when a branch is inspected.
+    private(set) var branchDetails: [String: WorktreeDetails] = [:]
 
     @ObservationIgnored private let store = ConfigStore()
     @ObservationIgnored private var scheduler: Task<Void, Never>?
@@ -206,7 +210,7 @@ final class AppModel {
         let added = newRepos.filter { existing[$0.path] == nil }
         repos = newRepos
         switch pane {
-        case .repo(let path), .worktree(let path, _):
+        case .repo(let path), .worktree(let path, _), .branch(let path, _):
             if repo(at: path) == nil { pane = nil }
         default: break
         }
@@ -255,6 +259,8 @@ final class AppModel {
                 await loadDetails(repo, worktreePath: wt)
             case .repo(let path) where path == repo.path:
                 if let main = snapshot.mainWorktree { await loadDetails(repo, worktreePath: main.path) }
+            case .branch(let path, let name) where path == repo.path:
+                await loadDetails(repo, branch: name)
             default: break
             }
         } catch {
@@ -267,12 +273,24 @@ final class AppModel {
             .worktreeDetails(path: worktreePath, primaryRef: repo.snapshot?.baseRef)
     }
 
-    /// Selects a worktree (or a repo's main checkout) and loads its details.
+    func loadDetails(_ repo: RepoState, branch: String) async {
+        branchDetails[Self.branchKey(repo.path, branch)] = await repository(repo)
+            .branchDetails(name: branch, primaryRef: repo.snapshot?.baseRef)
+    }
+
+    static func branchKey(_ repoPath: String, _ branch: String) -> String { repoPath + "\0" + branch }
+
+    /// Selects a worktree, branch or repo (its main checkout) and loads its details.
     func select(_ pane: Pane) {
         self.pane = pane
         switch pane {
         case .worktree(let path, let wt):
             if let repo = repo(at: path) { Task { await loadDetails(repo, worktreePath: wt) } }
+        case .branch(let path, let name):
+            // Reveal the row in the tree when selected from elsewhere (the repo inspector).
+            collapsed.remove(path)
+            branchesExpanded.insert(path)
+            if let repo = repo(at: path) { Task { await loadDetails(repo, branch: name) } }
         case .repo(let path):
             if let repo = repo(at: path), let main = repo.mainWorktree {
                 Task { await loadDetails(repo, worktreePath: main.path) }
