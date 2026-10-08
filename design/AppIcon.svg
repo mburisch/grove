@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Grove app icon: a tree whose branches are a git graph. Body follows the macOS icon grid
+       (824×824 rounded square, centered). Render with scripts/make-app-icon.sh. -->
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#62D274"/>
+      <stop offset="1" stop-color="#157046"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.28"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="shade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0B4A2C" stop-opacity="0"/>
+      <stop offset="1" stop-color="#0B4A2C" stop-opacity="0.35"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#body)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#sheen)"/>
+
+  <!-- canopy -->
+  <g fill="#FFFFFF" opacity="0.15">
+    <circle cx="512" cy="372" r="196"/>
+    <circle cx="352" cy="460" r="150"/>
+    <circle cx="672" cy="468" r="150"/>
+    <circle cx="512" cy="500" r="170"/>
+  </g>
+
+  <!-- shadow under the graph -->
+  <g transform="translate(0 14)" fill="none" stroke="url(#shade)" stroke-width="64" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M512 800 L512 300"/>
+    <path d="M512 668 C512 584 346 594 346 492 L346 410"/>
+    <path d="M512 594 C512 522 678 532 678 446 L678 420"/>
+  </g>
+
+  <!-- branches -->
+  <g fill="none" stroke="#FFFFFF" stroke-width="64" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M512 800 L512 300"/>
+    <path d="M512 668 C512 584 346 594 346 492 L346 410"/>
+    <path d="M512 594 C512 522 678 532 678 446 L678 420"/>
+  </g>
+
+  <!-- commits -->
+  <g fill="#2C9A58" stroke="#FFFFFF" stroke-width="34">
+    <circle cx="512" cy="282" r="58"/>
+    <circle cx="346" cy="394" r="58"/>
+    <circle cx="678" cy="404" r="58"/>
+  </g>
+</svg>

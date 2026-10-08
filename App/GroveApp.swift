@@ -163,12 +163,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return panel
     }
 
-    /// Menu bar icon: a warning on errors, otherwise the branch symbol with the count of repos behind.
+    /// Menu bar icon: a warning on errors, otherwise the Grove tree with the count of repos behind.
     private func updateStatusItem() {
         withObservationTracking {
             guard let button = statusItem?.button else { return }
-            let symbol = model.hasErrors ? "exclamationmark.triangle" : "arrow.triangle.branch"
-            let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Grove")
+            let image = model.hasErrors
+                ? NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: "Grove")
+                : NSImage(named: "MenuBarIcon")
+            image?.accessibilityDescription = "Grove"
             image?.isTemplate = true
             button.image = image
             let behind = model.behindTotal

@@ -37,6 +37,8 @@ open Grove.xcodeproj
 
 The Xcode project is generated from `project.yml` and isn't checked in; run `xcodegen generate` again after changing `project.yml`.
 
+The app icon is drawn in `design/AppIcon.svg`. After editing it, run `scripts/make-app-icon.sh design/AppIcon.svg` to regenerate `App/Assets.xcassets/AppIcon.appiconset`. The script also accepts a 1024×1024 PNG.
+
 Run the core tests with:
 
 ```sh
