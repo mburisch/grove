@@ -31,6 +31,10 @@ final class RepoState: Identifiable {
     var lastFetchAttempt: Date?
     var consecutiveFailures = 0
     var lastRefresh: Date?
+    /// GitHub pull requests by branch name, from `gh`; updated after each fetch.
+    var pullRequests: [String: PullRequestInfo] = [:]
+    /// Whether pull requests were looked up at least once (first load happens without a fetch).
+    var pullRequestsLoaded = false
 
     @ObservationIgnored private var tail: Task<Void, Never>?
 

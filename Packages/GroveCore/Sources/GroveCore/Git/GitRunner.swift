@@ -50,6 +50,8 @@ public struct GitResult: Sendable {
 /// (same `id`); `finished` is nil while it runs.
 public struct GitRunRecord: Sendable, Hashable, Identifiable {
     public var id: UUID
+    /// The program that ran: "git", or "gh" for GitHub lookups.
+    public var tool = "git"
     public var arguments: [String]
     public var directory: String?
     public var started: Date
@@ -72,11 +74,12 @@ public struct GitRunRecord: Sendable, Hashable, Identifiable {
         return failure != nil || (exitCode != 0 && !failureExpected)
     }
     public var duration: TimeInterval? { finished.map { $0.timeIntervalSince(started) } }
-    public var commandLine: String { (["git"] + arguments).joined(separator: " ") }
+    public var commandLine: String { ([tool] + arguments).joined(separator: " ") }
 
     /// True for read-only lookups (status, rev-parse, log, …) that Grove runs to refresh its view,
     /// as opposed to actions like fetch, pull or worktree add.
     public var isQuery: Bool {
+        if tool == "gh" { return true }  // Grove only reads from GitHub.
         let subcommand = arguments.first { !$0.hasPrefix("-") } ?? ""
         switch subcommand {
         case "status", "rev-parse", "for-each-ref", "log", "rev-list", "diff", "show", "ls-files",
@@ -96,6 +99,8 @@ public struct GitRunRecord: Sendable, Hashable, Identifiable {
 /// Runs the git CLI. Stateless and safe to share; each call spawns its own process.
 public struct GitRunner: Sendable {
     public var gitPath: String
+    /// Name shown for this runner's runs in the output log; the runner can also run `gh`.
+    public var tool: String
     /// Shared cap on concurrent git processes; nil runs without a limit.
     public var limiter: GitLimiter?
     /// Receives every run when it starts and when it ends, for the output log.
@@ -103,10 +108,12 @@ public struct GitRunner: Sendable {
 
     public init(
         gitPath: String = GitRunner.defaultGitPath,
+        tool: String = "git",
         limiter: GitLimiter? = nil,
         onRecord: (@Sendable (GitRunRecord) -> Void)? = nil
     ) {
         self.gitPath = gitPath
+        self.tool = tool
         self.limiter = limiter
         self.onRecord = onRecord
     }
@@ -164,7 +171,7 @@ public struct GitRunner: Sendable {
         input: Data?,
         onStderr: (@Sendable (String) -> Void)?
     ) async throws -> GitResult {
-        var record = GitRunRecord(id: UUID(), arguments: arguments, directory: directory?.path, started: .now)
+        var record = GitRunRecord(id: UUID(), tool: tool, arguments: arguments, directory: directory?.path, started: .now)
         record.failureExpected = !check
         onRecord?(record)
         var outcome: Result<Outcome, Error>
@@ -193,7 +200,7 @@ public struct GitRunner: Sendable {
             if run.timedOut { record.failure = "Timed out after \(timeout)" }
             if attempt > 1 { record.stderr = "(started on attempt \(attempt))\n" + record.stderr }
         case .failure(let error as LaunchFailure):
-            record.failure = "Couldn't start git (\(attempt) attempts): \(error.message)"
+            record.failure = "Couldn't start \(tool) (\(attempt) attempts): \(error.message)"
             onRecord?(record)
             throw GitError(arguments: arguments, exitCode: -1, stderr: "", launchFailure: error.message, runID: record.id)
         case .failure(let error):

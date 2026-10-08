@@ -81,3 +81,54 @@ struct WorkingTreeStatusText: View {
 extension Date {
     var relative: String { formatted(.relative(presentation: .named)) }
 }
+
+extension PullRequestInfo.State {
+    var label: String {
+        switch self {
+        case .open: "Open"
+        case .draft: "Draft"
+        case .merged: "Merged"
+        case .closed: "Closed"
+        }
+    }
+
+    /// GitHub's colors: green open, gray draft, purple merged, red closed.
+    var color: Color {
+        switch self {
+        case .open: .green
+        case .draft: .gray
+        case .merged: .purple
+        case .closed: .red
+        }
+    }
+}
+
+/// "Open", "Merged", … on a tinted capsule.
+struct PullRequestStateChip: View {
+    let state: PullRequestInfo.State
+
+    var body: some View {
+        Text(state.label)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(state.color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(state.color.opacity(0.15), in: Capsule())
+    }
+}
+
+/// "#123" in the pull request's state color, for tree rows; clicking opens it on GitHub.
+struct PullRequestBadge: View {
+    let pr: PullRequestInfo
+
+    var body: some View {
+        Button { NSWorkspace.shared.open(pr.url) } label: {
+            Text("#\(pr.number)")
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .foregroundStyle(pr.state.color)
+        }
+        .buttonStyle(.plain)
+        .pointerStyle(.link)
+        .help("Pull request #\(pr.number) (\(pr.state.label.lowercased())): \(pr.title) — click to open on GitHub")
+    }
+}

@@ -298,6 +298,9 @@ private struct BranchInspector: View {
                         }
                     }
                 }
+                if let pr = repo.pullRequests[branch.name] {
+                    PullRequestGridRow(pr: pr)
+                }
                 GridRow(alignment: .top) {
                     Text("Last commit").foregroundStyle(.secondary)
                     let head = details?.head ?? branch.commit
@@ -341,6 +344,25 @@ private struct BranchInspector: View {
     }
 }
 
+/// "Pull request  #123 Title [Open]", linking to the pull request on GitHub.
+private struct PullRequestGridRow: View {
+    let pr: PullRequestInfo
+
+    var body: some View {
+        GridRow(alignment: .top) {
+            Text("Pull request").foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Button { NSWorkspace.shared.open(pr.url) } label: {
+                    Text("#\(pr.number) \(pr.title)").multilineTextAlignment(.leading).lineLimit(2)
+                }
+                .buttonStyle(.link)
+                .help("Open on GitHub")
+                PullRequestStateChip(state: pr.state)
+            }
+        }
+    }
+}
+
 /// Tracking info, last commit, and actions for a worktree.
 private struct WorktreeSummary: View {
     @Environment(AppModel.self) private var model
@@ -370,6 +392,9 @@ private struct WorktreeSummary: View {
                             AheadBehindBadge(value: worktree.versusPrimary)
                         }
                     }
+                }
+                if let pr = worktree.branch.flatMap({ repo.pullRequests[$0] }) {
+                    PullRequestGridRow(pr: pr)
                 }
                 GridRow {
                     Text("Status").foregroundStyle(.secondary)

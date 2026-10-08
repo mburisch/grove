@@ -120,6 +120,16 @@ struct SettingsView: View {
                 Toggle("Pause in Low Power Mode", isOn: $model.config.pauseFetchInLowPowerMode)
             }
 
+            Section("GitHub") {
+                Toggle("Show pull requests", isOn: $model.config.gitHubPullRequests)
+                Text(GitHubPullRequests.ghPath() == nil && model.config.gitHubPullRequests
+                     ? "Needs the GitHub CLI: brew install gh, then gh auth login."
+                     : "Looks up pull requests for your branches with the GitHub CLI (gh) and its login, "
+                       + "after each fetch. When off, Grove never runs gh.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Open With") {
                 ForEach($model.config.launchers) { $launcher in
                     HStack {

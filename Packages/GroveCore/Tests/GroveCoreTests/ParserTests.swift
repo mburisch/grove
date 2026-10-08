@@ -148,5 +148,8 @@ struct ParserTests {
         #expect(config.repositories == ["/a"])
         #expect(config.defaultFetchIntervalMinutes == 5)
         #expect(config.launchers == Launcher.defaults)
+        #expect(config.gitHubPullRequests)  // On unless switched off.
+        let off = try JSONDecoder().decode(AppConfig.self, from: Data(#"{"gitHubPullRequests": false}"#.utf8))
+        #expect(!off.gitHubPullRequests)
     }
 }

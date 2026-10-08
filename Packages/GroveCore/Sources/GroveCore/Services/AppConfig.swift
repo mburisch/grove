@@ -81,6 +81,8 @@ public struct AppConfig: Codable, Sendable, Hashable {
     public var maxParallelGitRuns: Int = GitLimiter.defaultLimit
     public var launchers: [Launcher] = Launcher.defaults
     public var pauseFetchInLowPowerMode: Bool = true
+    /// Look up GitHub pull requests with the GitHub CLI (`gh`). When off, Grove never runs `gh`.
+    public var gitHubPullRequests: Bool = true
     /// Repo list sections, in order.
     public var groups: [RepoGroup] = []
     /// Custom order of repos not in any group; unlisted repos follow by name.
@@ -102,6 +104,7 @@ public struct AppConfig: Codable, Sendable, Hashable {
         maxParallelGitRuns = try c.decodeIfPresent(Int.self, forKey: .maxParallelGitRuns) ?? d.maxParallelGitRuns
         launchers = try c.decodeIfPresent([Launcher].self, forKey: .launchers) ?? d.launchers
         pauseFetchInLowPowerMode = try c.decodeIfPresent(Bool.self, forKey: .pauseFetchInLowPowerMode) ?? d.pauseFetchInLowPowerMode
+        gitHubPullRequests = try c.decodeIfPresent(Bool.self, forKey: .gitHubPullRequests) ?? d.gitHubPullRequests
         groups = try c.decodeIfPresent([RepoGroup].self, forKey: .groups) ?? d.groups
         ungroupedOrder = try c.decodeIfPresent([String].self, forKey: .ungroupedOrder) ?? d.ungroupedOrder
     }

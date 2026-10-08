@@ -377,6 +377,9 @@ private struct WorktreeTreeRow: View {
                     Text(worktree.displayName)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                    if let pr = worktree.branch.flatMap({ repo.pullRequests[$0] }) {
+                        PullRequestBadge(pr: pr)
+                    }
                     if worktree.isPrunable {
                         Text("missing").font(.caption).foregroundStyle(.red)
                     }
@@ -449,6 +452,9 @@ private struct BranchTreeRow: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .help(branch.name)
+                    if let pr = repo.pullRequests[branch.name] {
+                        PullRequestBadge(pr: pr)
+                    }
                 }
                 // Where a worktree row shows its folder: the upstream and the last commit's age.
                 HStack(spacing: 4) {

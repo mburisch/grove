@@ -57,6 +57,7 @@ final class AppModel {
         didSet {
             guard config != oldValue else { return }
             gitLimiter.setLimit(config.maxParallelGitRuns)
+            if config.gitHubPullRequests != oldValue.gitHubPullRequests { gitHubPullRequestsChanged() }
             persist()
         }
     }
@@ -107,6 +108,46 @@ final class AppModel {
             limiter: gitLimiter,
             onRecord: { run in Task { @MainActor in log.record(run) } }
         )
+    }
+
+    /// Runs the GitHub CLI for pull request lookups, logged with the git runs. Nil when the
+    /// setting is off or `gh` isn't installed; nothing else in Grove runs `gh`.
+    var gh: GitRunner? {
+        guard config.gitHubPullRequests, let path = GitHubPullRequests.ghPath() else { return nil }
+        let log = gitLog
+        return GitRunner(gitPath: path, tool: "gh", onRecord: { run in Task { @MainActor in log.record(run) } })
+    }
+
+    /// Looks up pull requests for the repo's worktree and local branches (not the primary branch,
+    /// whose same-named PRs are almost always from forks). Quietly does nothing without `gh`,
+    /// a GitHub remote, or a login; the attempt is visible on the Git Output page.
+    func loadPullRequests(_ repo: RepoState) async {
+        guard let gh, let snapshot = repo.snapshot, let gitHub = snapshot.gitHub else { return }
+        repo.pullRequestsLoaded = true
+        var branches = snapshot.worktrees.compactMap(\.branch) + snapshot.branches.map(\.name)
+        branches = Array(Set(branches)).filter { $0 != snapshot.primaryBranch }.sorted()
+        guard !branches.isEmpty else {
+            repo.pullRequests = [:]
+            return
+        }
+        if let prs = try? await GitHubPullRequests.fetch(repo: gitHub, branches: branches, gh: gh, in: repo.url),
+           config.gitHubPullRequests {  // Not if it was switched off meanwhile.
+            repo.pullRequests = prs
+        }
+    }
+
+    /// Off: forget all pull requests. On: look them up for every repo now.
+    private func gitHubPullRequestsChanged() {
+        for repo in repos {
+            repo.pullRequests = [:]
+            repo.pullRequestsLoaded = false
+        }
+        guard config.gitHubPullRequests else { return }
+        Task {
+            await withTaskGroup(of: Void.self) { group in
+                for repo in repos { group.addTask { await self.loadPullRequests(repo) } }
+            }
+        }
     }
 
     /// Which run the Git Output page selects when it opens.
@@ -293,6 +334,11 @@ final class AppModel {
             let snapshot = try await repository(repo).snapshot()
             repo.snapshot = snapshot
             repo.lastRefresh = .now
+            // After launch, show pull requests without waiting for the first fetch.
+            if !repo.pullRequestsLoaded && config.gitHubPullRequests {
+                repo.pullRequestsLoaded = true
+                Task { await loadPullRequests(repo) }
+            }
             // Keep the inspected worktree's details current.
             switch pane {
             case .worktree(let path, let wt) where path == repo.path:
@@ -426,6 +472,7 @@ final class AppModel {
                 repo.consecutiveFailures += 1
             }
             await loadSnapshot(repo)
+            if repo.lastError == nil { await loadPullRequests(repo) }
         }
     }
 
@@ -641,7 +688,15 @@ final class AppModel {
             repo.fail(error)
             return
         }
-        let remote = branch.upstream.flatMap { branch.upstreamGone ? nil : "\n\nThe remote branch \($0) is not deleted." } ?? ""
+        var remote = branch.upstream.flatMap { branch.upstreamGone ? nil : "\n\nThe remote branch \($0) is not deleted." } ?? ""
+        if let pr = repo.pullRequests[branch.name] {
+            let state = switch pr.state {
+            case .merged: "was merged"
+            case .closed: "was closed without merging"
+            case .open, .draft: "is still open"
+            }
+            remote += "\n\nPull request #\(pr.number) \(state)."
+        }
 
         let alert = NSAlert()
         alert.messageText = "Delete the branch \(branch.name)?"
