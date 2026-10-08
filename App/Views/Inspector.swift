@@ -56,6 +56,9 @@ private struct RepoInspector: View {
                     if let activity = repo.activity {
                         ProgressView().controlSize(.small)
                         Text(activity).font(.caption).foregroundStyle(.secondary)
+                    } else if let queued = repo.queued {
+                        Image(systemName: "clock").foregroundStyle(.secondary)
+                        Text(queued).font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 HStack(alignment: .firstTextBaseline) {
@@ -505,7 +508,7 @@ private struct RepoBanners: View {
         if let error = repo.lastError {
             Banner(text: error, style: .error, action: fix, actionDisabled: repo.activity != nil,
                    onDismiss: { repo.lastError = nil },
-                   details: { model.showGitOutput(for: repo, selecting: .latestProblem) })
+                   details: { model.showGitOutput(for: repo, selecting: repo.lastErrorRun.map { .run($0) } ?? .latestProblem) })
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         if let message = repo.lastMessage {

@@ -68,7 +68,11 @@ final class AppModel {
     }
 
     /// Which run the Git Output page selects when it opens.
-    enum GitLogFocus { case latestAction, latestProblem }
+    enum GitLogFocus {
+        case latestAction, latestProblem
+        /// A specific run, e.g. the one behind an error banner.
+        case run(UUID)
+    }
     var gitLogFocus: GitLogFocus?
 
     /// Opens the Git Output page, narrowed to one repo when given, with its latest action
@@ -254,7 +258,7 @@ final class AppModel {
             default: break
             }
         } catch {
-            repo.lastError = error.localizedDescription.unescapingUnicode
+            repo.fail(error)
         }
     }
 
@@ -294,8 +298,7 @@ final class AppModel {
                 repo.lastError = nil
                 repo.consecutiveFailures = 0
             } catch {
-                repo.lastError = error.localizedDescription.unescapingUnicode
-                repo.clobberedTags = (error as? GitError)?.clobberedTags ?? []
+                repo.fail(error)
                 repo.consecutiveFailures += 1
             }
             await loadSnapshot(repo)
@@ -312,21 +315,21 @@ final class AppModel {
                 repo.lastMessage = "Updated \(tags.count == 1 ? "tag" : "tags") "
                     + tags.joined(separator: ", ") + " to the remote's version"
             } catch {
-                repo.lastError = error.localizedDescription.unescapingUnicode
+                repo.fail(error)
             }
         }
         await fetch(repo)
     }
 
     func fetchAll() async {
-        await runLimited(repos) { await self.fetch($0) }
+        await runLimited(repos, queuedLabel: "Waiting to fetch") { await self.fetch($0) }
     }
 
     /// Fetches the repos in a group (nil = the ungrouped repos).
     func fetch(group: RepoGroup.ID?) async {
         let section = config.sections(for: repos.map(\.path)).first { $0.group?.id == group }
         let members = section?.repos.compactMap { repo(at: $0) } ?? []
-        await runLimited(members) { await self.fetch($0) }
+        await runLimited(members, queuedLabel: "Waiting to fetch") { await self.fetch($0) }
     }
 
     /// Fetches, then fast-forwards every clean worktree and every local branch that is strictly behind.
@@ -359,7 +362,7 @@ final class AppModel {
     }
 
     func pullAll() async {
-        await runLimited(repos) { await self.pull($0) }
+        await runLimited(repos, queuedLabel: "Waiting to pull") { await self.pull($0) }
     }
 
     func pull(_ repo: RepoState, worktree: WorktreeInfo) async {
@@ -372,7 +375,7 @@ final class AppModel {
                 case .skipped(let reason): "\(worktree.branch ?? "HEAD") not updated: \(reason)"
                 }
             } catch {
-                repo.lastError = error.localizedDescription.unescapingUnicode
+                repo.fail(error)
             }
             await loadSnapshot(repo)
         }
@@ -385,7 +388,7 @@ final class AppModel {
                     repo.lastMessage = "\(branch.name) not updated: \(reason)"
                 }
             } catch {
-                repo.lastError = error.localizedDescription.unescapingUnicode
+                repo.fail(error)
             }
             await loadSnapshot(repo)
         }
@@ -408,7 +411,7 @@ final class AppModel {
                 repo.lastError = nil
                 repo.lastMessage = "Converted to \(mode.label.lowercased()) checkout"
             } catch {
-                repo.lastError = error.localizedDescription.unescapingUnicode
+                repo.fail(error)
             }
             await loadSnapshot(repo)
         }
@@ -437,7 +440,7 @@ final class AppModel {
                 }
                 return
             } catch {
-                repo.lastError = error.localizedDescription.unescapingUnicode
+                repo.fail(error)
             }
             await loadSnapshot(repo)
         }
@@ -552,7 +555,7 @@ final class AppModel {
             guard let last = repo.lastFetch else { return true }
             return now.timeIntervalSince(last) >= Double(minutes) * 60 * backoff
         }
-        await runLimited(due) { await self.fetch($0) }
+        await runLimited(due, queuedLabel: "Waiting to fetch") { await self.fetch($0) }
     }
 
     private func startNetworkMonitor() {
@@ -571,15 +574,27 @@ final class AppModel {
     }
 
     /// Runs `body` for each repo with at most `limit` in flight.
-    private func runLimited(_ items: [RepoState], limit: Int = 3, _ body: @escaping @MainActor (RepoState) async -> Void) async {
+    /// Runs `body` for each repo, a few at a time. Repos waiting their turn show `queuedLabel`.
+    private func runLimited(
+        _ items: [RepoState],
+        queuedLabel: String,
+        limit: Int = 3,
+        _ body: @escaping @MainActor (RepoState) async -> Void
+    ) async {
+        // Repos already busy keep showing their activity; the operation queues behind it anyway.
+        for item in items where item.activity == nil { item.queued = queuedLabel }
+        let run: @MainActor (RepoState) async -> Void = { repo in
+            await body(repo)
+            repo.queued = nil
+        }
         await withTaskGroup(of: Void.self) { group in
             var iterator = items.makeIterator()
             for _ in 0..<limit {
                 guard let next = iterator.next() else { break }
-                group.addTask { await body(next) }
+                group.addTask { await run(next) }
             }
             for await _ in group {
-                if let next = iterator.next() { group.addTask { await body(next) } }
+                if let next = iterator.next() { group.addTask { await run(next) } }
             }
         }
     }

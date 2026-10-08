@@ -75,7 +75,11 @@ struct GitOutputView: View {
             // back to its latest run of any kind.
             let finished = records.filter { !$0.isRunning }
             switch model.gitLogFocus {
-            case .latestProblem: selection = (finished.first { !$0.succeeded } ?? finished.first)?.id
+            case .run(let id):
+                // Drop the repo filter if the run happened in a folder it doesn't cover.
+                if !records.contains(where: { $0.id == id }) { model.gitLogRepo = nil }
+                selection = id
+            case .latestProblem: selection = (finished.first(where: \.isProblem) ?? finished.first)?.id
             case .latestAction: selection = (finished.first { !$0.isQuery } ?? finished.first)?.id
             case nil: break
             }
@@ -98,7 +102,7 @@ struct GitOutputView: View {
             switch kind {
             case .all: break
             case .actions: if record.isQuery { return false }
-            case .problems: if record.isRunning || record.succeeded { return false }
+            case .problems: if !record.isProblem { return false }
             }
             if let paths, !paths.contains(record.directory ?? "") { return false }
             if !query.isEmpty {
@@ -160,6 +164,10 @@ private struct StatusIcon: View {
             ProgressView().controlSize(.mini)
         } else if record.succeeded {
             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        } else if !record.isProblem {
+            // An optional lookup that came back empty, or a cancelled run: nothing to act on.
+            Image(systemName: "minus.circle.fill").foregroundStyle(.secondary)
+                .help(record.failure == "Cancelled" ? "Cancelled" : "Failed, but Grove expects this lookup to fail sometimes and carries on without it")
         } else {
             Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
         }
@@ -188,6 +196,9 @@ private struct RunDetail: View {
                     if let duration = record.duration { row("Took", formatDuration(duration)) }
                     if let code = record.exitCode { row("Exit code", "\(code)") }
                     if let failure = record.failure { row("Problem", failure) }
+                    if record.failureExpected && !record.succeeded && record.failure == nil {
+                        row("Note", "Optional lookup: Grove carries on without it, e.g. a branch with no common history with the primary branch.")
+                    }
                 }
                 .font(.callout)
                 stream("Error output (stderr)", record.stderr)

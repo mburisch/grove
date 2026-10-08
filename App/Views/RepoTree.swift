@@ -304,6 +304,7 @@ private struct RepoTreeRow: View {
             StatusCell(
                 worktree: main,
                 activity: repo.activity,
+                queued: repo.queued,
                 error: repo.lastError,
                 showTracking: true,
                 loading: repo.snapshot == nil
@@ -316,7 +317,7 @@ private struct RepoTreeRow: View {
                 }
                 LaunchIconButton(path: repo.path)
             }
-            .disabled(repo.activity != nil)
+            .disabled(repo.activity != nil || repo.queued != nil)
             .frame(width: Column.actions, alignment: .trailing)
         }
         .padding(.vertical, 3)
@@ -383,7 +384,7 @@ private struct WorktreeTreeRow: View {
             .padding(.leading, Column.indent)
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            StatusCell(worktree: worktree, activity: nil, error: nil, showTracking: false, loading: false)
+            StatusCell(worktree: worktree, activity: nil, queued: nil, error: nil, showTracking: false, loading: false)
 
             HStack(spacing: 6) {
                 if (worktree.tracking?.behind ?? 0) > 0 {
@@ -494,6 +495,8 @@ private struct PathText: View {
 private struct StatusCell: View {
     let worktree: WorktreeInfo?
     let activity: String?
+    /// Waiting for its turn in a batch, e.g. "Waiting to fetch".
+    let queued: String?
     let error: String?
     /// Repo rows show ahead/behind vs upstream; worktree rows show their diff vs primary.
     let showTracking: Bool
@@ -505,6 +508,10 @@ private struct StatusCell: View {
             if let activity {
                 ProgressView().controlSize(.small)
                     .help(activity)
+            } else if let queued {
+                Image(systemName: "clock")
+                    .foregroundStyle(.secondary)
+                    .help(queued)
             } else if loading {
                 ProgressView().controlSize(.small)
             }

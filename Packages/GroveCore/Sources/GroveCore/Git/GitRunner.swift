@@ -7,6 +7,8 @@ public struct GitError: Error, LocalizedError, Sendable {
     public var timedOut: Bool = false
     /// Set when git could not be started at all, e.g. "Bad file descriptor (POSIX error 9)".
     public var launchFailure: String?
+    /// The output-log entry of the failed run, so the UI can show exactly that output.
+    public var runID: UUID?
 
     /// Tags a fetch refused to update because they moved on the remote, from git's
     /// `! [rejected] latest -> latest (would clobber existing tag)` lines.
@@ -57,9 +59,18 @@ public struct GitRunRecord: Sendable, Hashable, Identifiable {
     public var stderr: String = ""
     /// Why the run failed without a normal exit: could not start, timed out or was cancelled.
     public var failure: String?
+    /// The caller checks the exit code itself (e.g. an optional lookup that may legitimately fail,
+    /// such as a diff against a branch with no merge base), so a non-zero exit is not a problem.
+    public var failureExpected = false
 
     public var isRunning: Bool { finished == nil }
     public var succeeded: Bool { finished != nil && failure == nil && exitCode == 0 }
+    /// Failed in a way worth looking at: couldn't start, timed out, or exited non-zero where
+    /// that wasn't expected. Cancellation is not a problem.
+    public var isProblem: Bool {
+        guard finished != nil, failure != "Cancelled" else { return false }
+        return failure != nil || (exitCode != 0 && !failureExpected)
+    }
     public var duration: TimeInterval? { finished.map { $0.timeIntervalSince(started) } }
     public var commandLine: String { (["git"] + arguments).joined(separator: " ") }
 
@@ -154,6 +165,7 @@ public struct GitRunner: Sendable {
         onStderr: (@Sendable (String) -> Void)?
     ) async throws -> GitResult {
         var record = GitRunRecord(id: UUID(), arguments: arguments, directory: directory?.path, started: .now)
+        record.failureExpected = !check
         onRecord?(record)
         var outcome: Result<Outcome, Error>
         var attempt = 1
@@ -183,7 +195,7 @@ public struct GitRunner: Sendable {
         case .failure(let error as LaunchFailure):
             record.failure = "Couldn't start git (\(attempt) attempts): \(error.message)"
             onRecord?(record)
-            throw GitError(arguments: arguments, exitCode: -1, stderr: "", launchFailure: error.message)
+            throw GitError(arguments: arguments, exitCode: -1, stderr: "", launchFailure: error.message, runID: record.id)
         case .failure(let error):
             record.failure = error is CancellationError ? "Cancelled" : "\(error)"
             onRecord?(record)
@@ -193,11 +205,11 @@ public struct GitRunner: Sendable {
         onRecord?(record)
 
         if case .success(let run) = outcome, run.timedOut {
-            throw GitError(arguments: arguments, exitCode: result.exitCode, stderr: result.stderr, timedOut: true)
+            throw GitError(arguments: arguments, exitCode: result.exitCode, stderr: result.stderr, timedOut: true, runID: record.id)
         }
         try Task.checkCancellation()
         if check && result.exitCode != 0 {
-            throw GitError(arguments: arguments, exitCode: result.exitCode, stderr: result.stderr)
+            throw GitError(arguments: arguments, exitCode: result.exitCode, stderr: result.stderr, runID: record.id)
         }
         return result
     }
@@ -244,9 +256,21 @@ public struct GitRunner: Sendable {
         process.standardError = stderrPipe
         let stdinPipe = input.map { _ in Pipe() }
         process.standardInput = stdinPipe ?? FileHandle.nullDevice
+        // Close every pipe end as soon as the run is over instead of whenever the objects are
+        // freed: anything still holding the Process (or a Pipe) would otherwise keep descriptors
+        // open, and a GUI app runs out of them (256 by default), after which git can't be started
+        // at all ("Bad file descriptor").
+        defer {
+            for pipe in [stdoutPipe, stderrPipe] + (stdinPipe.map { [$0] } ?? []) {
+                try? pipe.fileHandleForReading.close()
+                try? pipe.fileHandleForWriting.close()
+            }
+        }
 
         let timedOut = Flag()
         let readers = Readers()
+        // Ends the timeout task once git exits so it doesn't keep the Process alive.
+        defer { readers.timeout?.cancel() }
         let exitCode: Int32 = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 process.terminationHandler = { process in
@@ -271,8 +295,8 @@ public struct GitRunner: Sendable {
                         try? stdinPipe.fileHandleForWriting.close()
                     }
                 }
-                Task.detached {
-                    try? await Task.sleep(for: timeout)
+                readers.timeout = Task.detached { [weak process] in
+                    guard (try? await Task.sleep(for: timeout)) != nil, let process else { return }
                     if process.isRunning {
                         timedOut.set()
                         process.terminate()
@@ -335,10 +359,11 @@ private final class StreamReader: @unchecked Sendable {
     }
 }
 
-/// The readers of one run, created once the process has started.
+/// The readers and timeout of one run, created once the process has started.
 private final class Readers: @unchecked Sendable {
     var stdout: StreamReader?
     var stderr: StreamReader?
+    var timeout: Task<Void, Never>?
 }
 
 private final class DataBuffer: @unchecked Sendable {

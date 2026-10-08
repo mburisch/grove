@@ -9,11 +9,23 @@ final class RepoState: Identifiable {
     var snapshot: RepoSnapshot?
     /// What the repository is doing right now, e.g. "Fetching…".
     var activity: String?
+    /// Part of a batch (Fetch All, Pull All, a group fetch) but not started yet, e.g. "Waiting to fetch".
+    var queued: String?
     var lastError: String? {
-        didSet { if lastError == nil { clobberedTags = [] } }
+        didSet { if lastError == nil { clobberedTags = []; lastErrorRun = nil } }
     }
     /// Tags the last fetch refused to update because they moved on the remote; offered as a fix.
     var clobberedTags: [String] = []
+    /// The git run behind `lastError`, shown by the banner's Show Output.
+    var lastErrorRun: UUID?
+
+    /// Shows `error` as this repo's error, remembering which git run caused it.
+    func fail(_ error: Error) {
+        let gitError = error as? GitError
+        lastError = error.localizedDescription.unescapingUnicode
+        lastErrorRun = gitError?.runID
+        clobberedTags = gitError?.clobberedTags ?? []
+    }
     /// Short result of the last user action, e.g. "Pulled 3 commits".
     var lastMessage: String?
     var lastFetchAttempt: Date?
@@ -50,6 +62,7 @@ final class RepoState: Identifiable {
         let previous = tail
         let task = Task { @MainActor in
             await previous?.value
+            queued = nil
             activity = label
             await operation()
             activity = nil
