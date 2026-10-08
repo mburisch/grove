@@ -163,6 +163,45 @@ public struct WorktreeDetails: Sendable, Hashable {
     public var changedSinceBase: [FileChange]
 }
 
+/// One file's diff, parsed from `git diff` output.
+public struct FileDiff: Sendable, Hashable {
+    public var hunks: [DiffHunk]
+    /// git reported "Binary files … differ" instead of lines.
+    public var isBinary: Bool
+    /// Lines were dropped after `GitParsers.maxDiffLines`.
+    public var truncated: Bool
+
+    public init(hunks: [DiffHunk] = [], isBinary: Bool = false, truncated: Bool = false) {
+        self.hunks = hunks
+        self.isBinary = isBinary
+        self.truncated = truncated
+    }
+}
+
+public struct DiffHunk: Sendable, Hashable {
+    /// The `@@ -a,b +c,d @@ context` line.
+    public var header: String
+    public var lines: [DiffLine]
+}
+
+public struct DiffLine: Sendable, Hashable {
+    public enum Kind: Sendable, Hashable { case context, added, removed, note }
+    public var kind: Kind
+    public var oldNumber: Int?
+    public var newNumber: Int?
+    public var text: String
+}
+
+/// Which comparison a file's diff belongs to (mirrors how the Inspector's file lists are built).
+public enum DiffScope: Sendable, Hashable {
+    /// Working tree (staged and unstaged) vs HEAD.
+    case uncommitted(worktree: String)
+    /// Working tree vs the merge base of HEAD and `primaryRef`.
+    case sinceBase(worktree: String, primaryRef: String)
+    /// A branch without a worktree vs its fork point from `primaryRef`.
+    case branch(name: String, primaryRef: String)
+}
+
 /// A point-in-time read of a repository's state.
 public struct RepoSnapshot: Sendable, Hashable {
     public var remoteName: String?

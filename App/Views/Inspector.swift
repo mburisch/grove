@@ -123,7 +123,8 @@ private struct RepoInspector: View {
                 Divider()
                 SectionTitle("Main Checkout")
                 WorktreeSummary(repo: repo, worktree: main)
-                WorktreeChanges(worktree: main, details: model.details[main.path], primary: repo.snapshot?.baseRef)
+                WorktreeChanges(repo: repo, worktree: main, details: model.details[main.path], primary: repo.snapshot?.baseRef,
+                                returnTo: .repo(repo.path))
             }
 
             if let snapshot = repo.snapshot {
@@ -189,6 +190,18 @@ private struct WorktreeInspector: View {
                 }
                 .buttonStyle(.link)
                 .help("Reveal in Finder")
+                // On its own line so the path gets the full width.
+                Button(role: .destructive) {
+                    Task { await model.confirmRemoveWorktree(repo, worktree: worktree) }
+                } label: {
+                    Label("Remove Worktree…", systemImage: "trash")
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .disabled(worktree.isLocked || repo.activity != nil)
+                .help(worktree.isLocked
+                      ? "Locked: unlock it with git worktree unlock first"
+                      : "Delete this folder after confirming; the branch is kept")
                 if worktree.isLocked { Label("Locked", systemImage: "lock.fill").font(.caption) }
                 if worktree.isPrunable {
                     Label("Folder is missing (prunable)", systemImage: "exclamationmark.triangle")
@@ -198,12 +211,25 @@ private struct WorktreeInspector: View {
             }
             RepoBanners(repo: repo)
             WorktreeSummary(repo: repo, worktree: worktree)
-            WorktreeChanges(worktree: worktree, details: model.details[worktree.path], primary: repo.snapshot?.baseRef)
+            WorktreeChanges(repo: repo, worktree: worktree, details: model.details[worktree.path], primary: repo.snapshot?.baseRef,
+                            returnTo: .worktree(repo: repo.path, path: worktree.path))
         }
     }
 }
 
 // MARK: - Branch
+
+/// A local branch without a worktree, for views that show its files.
+/// Where a file list's diffs come from and which page they return to.
+struct DiffSource {
+    let request: DiffRequest
+    let scope: DiffScope
+}
+
+struct BranchRef {
+    let repo: RepoState
+    let name: String
+}
 
 /// A local branch without a worktree: the same summary and changes as a worktree, minus the working tree.
 private struct BranchInspector: View {
@@ -228,6 +254,15 @@ private struct BranchInspector: View {
                 Text("Branch of \(repo.name) — not checked out in a worktree")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                // Same spot as "Remove Worktree…" on a worktree's page. The only way Grove creates
+                // a worktree: on this click, in a folder the user names.
+                Button(action: createWorktree) {
+                    Label("Create Worktree…", systemImage: "plus.rectangle.on.folder")
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .disabled(repo.activity != nil)
+                .help("Check out \(branch.name) in a new worktree; you choose the folder")
             }
             RepoBanners(repo: repo)
 
@@ -277,49 +312,23 @@ private struct BranchInspector: View {
                           ? "Diverged from \(branch.upstream ?? "upstream"): \(tracking.ahead) local commits"
                           : "Move \(branch.name) to \(branch.upstream ?? "upstream")")
                 }
-                Button { Task { await model.createWorktree(repo, branch: branch.name, openWith: nil) } } label: {
-                    Label("Create Worktree", systemImage: "plus.rectangle.on.folder")
-                }
-                .disabled(repo.activity != nil)
-                .help("Check out \(branch.name) in a new worktree next to the repository")
                 Button { copyToPasteboard(branch.name) } label: { Label("Copy Name", systemImage: "doc.on.doc") }
             }
             .controlSize(.small)
 
-            CreateWorktreeLauncherGrid(repo: repo, branch: branch.name)
-
-            WorktreeChanges(root: repo.path, details: details, primary: primary, aheadCount: branch.versusPrimary?.ahead,
-                            hasWorkingTree: false)
+            WorktreeChanges(repo: repo, root: repo.path, details: details, primary: primary, aheadCount: branch.versusPrimary?.ahead,
+                            returnTo: .branch(repo: repo.path, name: branch.name),
+                            branch: BranchRef(repo: repo, name: branch.name))
         }
     }
-}
 
-/// One "Create worktree & open" button per launcher, like `LauncherGrid` for a worktree.
-private struct CreateWorktreeLauncherGrid: View {
-    @Environment(AppModel.self) private var model
-    let repo: RepoState
-    let branch: String
-
-    var body: some View {
-        let launchers = model.availableLaunchers
-        if !launchers.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Create a worktree and open it in").font(.caption).foregroundStyle(.secondary)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 6)], alignment: .leading, spacing: 6) {
-                    ForEach(launchers) { launcher in
-                        Button { Task { await model.createWorktree(repo, branch: branch, openWith: launcher) } } label: {
-                            HStack(spacing: 5) {
-                                LauncherIcon(launcher: launcher)
-                                Text(launcher.name).lineLimit(1)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .controlSize(.small)
-                    }
-                }
-                .disabled(repo.activity != nil)
-            }
-        }
+    private func createWorktree() {
+        guard let folder = Panels.chooseNewFolder(
+            title: "Create Worktree",
+            prompt: "Create",
+            message: "Choose where to create the worktree for \(branch.name). Enter a name for a new folder."
+        ) else { return }
+        Task { await model.createWorktree(repo, branch: branch.name, at: folder) }
     }
 }
 
@@ -428,39 +437,60 @@ private struct LauncherIcon: View {
 }
 
 /// Uncommitted files, commits not on primary, and files changed vs primary.
-/// For a branch without a worktree (`hasWorkingTree == false`) only the committed changes are shown,
-/// and files can't be opened because that version isn't on disk.
+/// For a branch without a worktree only the committed changes are shown, and files open as
+/// read-only copies of the branch's version (see `AppModel.openFile(_:onBranch:in:with:)`).
 private struct WorktreeChanges: View {
+    @Environment(AppModel.self) private var model
+    let repo: RepoState
     /// The worktree folder; for a branch, the repository.
     let root: String
     let details: WorktreeDetails?
     let primary: String?
     /// Commits ahead of primary when known (the list itself is capped).
     let aheadCount: Int?
-    var hasWorkingTree = true
+    /// The page a file's diff returns to.
+    let returnTo: Pane
+    /// Set when showing a branch that has no worktree.
+    let branch: BranchRef?
+    private var hasWorkingTree: Bool { branch == nil }
 
-    init(worktree: WorktreeInfo, details: WorktreeDetails?, primary: String?) {
-        self.init(root: worktree.path, details: details, primary: primary, aheadCount: worktree.versusPrimary?.ahead)
+    init(repo: RepoState, worktree: WorktreeInfo, details: WorktreeDetails?, primary: String?, returnTo: Pane) {
+        self.init(repo: repo, root: worktree.path, details: details, primary: primary,
+                  aheadCount: worktree.versusPrimary?.ahead, returnTo: returnTo)
     }
 
-    init(root: String, details: WorktreeDetails?, primary: String?, aheadCount: Int?, hasWorkingTree: Bool = true) {
+    init(repo: RepoState, root: String, details: WorktreeDetails?, primary: String?, aheadCount: Int?,
+         returnTo: Pane, branch: BranchRef? = nil) {
+        self.repo = repo
+        self.returnTo = returnTo
         self.root = root
         self.details = details
         self.primary = primary
         self.aheadCount = aheadCount
-        self.hasWorkingTree = hasWorkingTree
+        self.branch = branch
+    }
+
+    private var diffRequest: DiffRequest {
+        DiffRequest(repo: repo.path, target: branch.map { .branch($0.name) } ?? .worktree(root), returnTo: returnTo)
     }
 
     var body: some View {
         if let details {
             VStack(alignment: .leading, spacing: 14) {
+                Button { model.showDiffs(diffRequest) } label: {
+                    Label("View Diffs", systemImage: "doc.text.magnifyingglass")
+                }
+                .controlSize(.small)
+                .disabled(details.uncommitted.isEmpty && details.changedSinceBase.isEmpty)
+                .help("Browse the changed files and their diffs")
                 if hasWorkingTree {
                     VStack(alignment: .leading, spacing: 4) {
                         FileListHeader(title: "Uncommitted", files: details.uncommitted)
                         if details.uncommitted.isEmpty {
                             EmptyNote("No uncommitted changes")
                         } else {
-                            FileTable(root: root, files: details.uncommitted)
+                            FileTable(root: root, files: details.uncommitted,
+                                      diff: DiffSource(request: diffRequest, scope: .uncommitted(worktree: root)))
                         }
                     }
                 }
@@ -481,7 +511,11 @@ private struct WorktreeChanges: View {
                         if details.changedSinceBase.isEmpty {
                             EmptyNote("No differences")
                         } else {
-                            FileTable(root: root, files: details.changedSinceBase, canOpen: hasWorkingTree)
+                            FileTable(root: root, files: details.changedSinceBase,
+                                      diff: DiffSource(request: diffRequest,
+                                                       scope: branch.map { .branch(name: $0.name, primaryRef: primary) }
+                                                           ?? .sinceBase(worktree: root, primaryRef: primary)),
+                                      branch: branch)
                         }
                     }
                 }
@@ -545,14 +579,16 @@ private struct FileTable: View {
     static let numberWidth: CGFloat = 46
     let root: String
     let files: [FileChange]
-    /// False when the files aren't on disk at this version (a branch without a worktree).
-    var canOpen = true
+    /// How a clicked file's diff is computed.
+    let diff: DiffSource
+    /// Set for a branch without a worktree: files open as a read-only copy of the branch's version.
+    var branch: BranchRef?
     private let limit = 300
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(files.prefix(limit)) { file in
-                FileRow(root: root, file: file, canOpen: canOpen)
+                FileRow(root: root, file: file, diff: diff, branch: branch)
             }
             if files.count > limit {
                 Text("… and \(files.count - limit) more").font(.caption).foregroundStyle(.secondary)
@@ -566,11 +602,25 @@ private struct FileRow: View {
     @Environment(AppModel.self) private var model
     let root: String
     let file: FileChange
-    let canOpen: Bool
+    let diff: DiffSource
+    let branch: BranchRef?
     @State private var hovering = false
 
     private var absolutePath: String { (root as NSString).appendingPathComponent(file.path) }
-    private var openable: Bool { canOpen && !file.isDeleted }
+    /// A branch's copy is written as text, so binary files on a branch can't be opened.
+    private var openable: Bool { !file.isDeleted && (branch == nil || file.insertions != nil) }
+
+    private func open(with editor: Launcher) {
+        if let branch {
+            Task { await model.openFile(file.path, onBranch: branch.name, in: branch.repo, with: editor) }
+        } else {
+            model.open(absolutePath, with: editor)
+        }
+    }
+
+    private func showDiff() {
+        model.showDiffs(diff.request, selecting: DiffSelection(file: file, scope: diff.scope))
+    }
 
     var body: some View {
         let editors = model.fileLaunchers
@@ -605,12 +655,12 @@ private struct FileRow: View {
             }
             // Space is always reserved so the number columns stay aligned.
             Button {
-                if let first = editors.first { model.open(absolutePath, with: first) }
+                if let first = editors.first { open(with: first) }
             } label: {
                 Image(systemName: "arrow.up.forward.square")
             }
             .buttonStyle(.borderless)
-            .help(editors.first.map { "Open in \($0.name)" } ?? "")
+            .help(editors.first.map { editor in "Open \(branch.map { "\($0.name)'s version " } ?? "")in \(editor.name)" } ?? "")
             .opacity(hovering && openable && !editors.isEmpty ? 1 : 0)
             .disabled(!openable || editors.isEmpty)
             .frame(width: 16)
@@ -618,16 +668,23 @@ private struct FileRow: View {
         .font(.caption.monospacedDigit())
         .padding(.vertical, 3)
         .padding(.horizontal, 4)
-        .background(hovering && openable ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 4))
+        .background(hovering ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 4))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
+        // Double-click is checked first, so a single click waits briefly before showing the diff.
+        .onTapGesture(count: 2) { if openable, let first = editors.first { open(with: first) } }
+        .onTapGesture { showDiff() }
         .help(helpText)
         .contextMenu {
-            if canOpen {
-                ForEach(editors) { editor in
-                    Button("Open in \(editor.name)") { model.open(absolutePath, with: editor) }
+            Button("Show Diff") { showDiff() }
+            Divider()
+            ForEach(editors) { editor in
+                Button("Open \(branch.map { "\($0.name)'s Version " } ?? "")in \(editor.name)") {
+                    open(with: editor)
                 }
-                .disabled(file.isDeleted)
+            }
+            .disabled(!openable)
+            if branch == nil {
                 Divider()
                 Button("Reveal in Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: absolutePath)])
@@ -650,7 +707,7 @@ private struct FileRow: View {
 
     private var helpText: String {
         let text = file.oldPath.map { "\($0) → \(file.path)" } ?? file.path
-        return file.isDeleted ? text + " (deleted)" : text
+        return (file.isDeleted ? text + " (deleted)" : text) + "\nClick to show the diff, double-click to open"
     }
 }
 
@@ -766,7 +823,6 @@ private struct BranchRow: View {
                     Task { await model.fastForward(repo, branch: branch) }
                 }
             }
-            WorktreeLaunchMenu(repo: repo, branch: branch.name)
         }
         .font(.callout)
     }
@@ -790,7 +846,6 @@ private struct RemoteBranchRow: View {
                 CommitLine(commit: branch.commit)
             }
             Spacer(minLength: 4)
-            WorktreeLaunchMenu(repo: repo, branch: branch.name)
         }
         .font(.callout)
     }

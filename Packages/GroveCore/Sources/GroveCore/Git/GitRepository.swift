@@ -238,6 +238,17 @@ public struct GitRepository: Sendable {
         )
     }
 
+    /// Writes `path` as it is at `ref` to `destination` as a read-only file, replacing an older copy.
+    /// The content goes through git's text output, so binary files are not preserved.
+    public func exportFile(_ path: String, at ref: String, to destination: URL) async throws {
+        let content = try await git.run(["show", "\(ref):\(path)"], in: url).stdout
+        let fm = FileManager.default
+        try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? fm.removeItem(at: destination)
+        try Data(content.utf8).write(to: destination)
+        try fm.setAttributes([.posixPermissions: 0o444], ofItemAtPath: destination.path)
+    }
+
     /// Commits and changed files of a local branch that has no worktree, vs `primaryRef`.
     /// There is no working tree, so `uncommitted` is always empty.
     public func branchDetails(name: String, primaryRef: String?, maxCommits: Int = 50) async -> WorktreeDetails {
@@ -255,6 +266,42 @@ public struct GitRepository: Sendable {
             commitsAhead: GitParsers.parseLog(await ahead ?? ""),
             changedSinceBase: await sinceBase
         )
+    }
+
+    /// The diff of one file in `scope`, using the same comparison as the Inspector's file lists.
+    /// With `fullContext` the whole file comes back as one hunk, for folding in the UI.
+    public func fileDiff(_ file: FileChange, scope: DiffScope, fullContext: Bool = true) async -> FileDiff {
+        // Both paths for a rename, so git pairs them up again.
+        let paths = ["--"] + [file.oldPath, file.path].compactMap { $0 }
+        let context = fullContext ? ["-U1000000"] : []
+        let output: String?
+        switch scope {
+        case let .uncommitted(worktree):
+            let wt = URL(fileURLWithPath: worktree)
+            if file.isUntracked {
+                // Exits 1 when the files differ, which they always do here.
+                output = try? await git.run(["diff", "--no-color", "--no-ext-diff", "--no-index"] + context + ["--", "/dev/null", file.path], in: wt, check: false).stdout
+            } else {
+                output = await rawDiff(["-M", "HEAD"] + context + paths, in: wt)
+            }
+        case let .sinceBase(worktree, primaryRef):
+            let wt = URL(fileURLWithPath: worktree)
+            if let base = await git.outputIfSuccess(["merge-base", "HEAD", primaryRef], in: wt) {
+                output = await rawDiff(["-M", base] + context + paths, in: wt)
+            } else {
+                output = nil
+            }
+        case let .branch(name, primaryRef):
+            output = await rawDiff(["-M", "\(primaryRef)...refs/heads/\(name)"] + context + paths, in: url)
+        }
+        return GitParsers.parseUnifiedDiff(output ?? "")
+    }
+
+    /// `git diff` stdout without trimming, which would drop a trailing blank context line.
+    private func rawDiff(_ arguments: [String], in dir: URL) async -> String? {
+        guard let result = try? await git.run(["diff", "--no-color", "--no-ext-diff"] + arguments, in: dir, timeout: .seconds(60), check: false),
+              result.exitCode == 0 else { return nil }
+        return result.stdout
     }
 
     /// Working tree vs the merge base of HEAD and the primary branch.
@@ -356,6 +403,25 @@ public struct GitRepository: Sendable {
     /// Creates a worktree for an existing local branch, or for a remote branch (creating a tracking branch).
     public func addWorktree(branch: String, at path: URL) async throws {
         try await git.run(["worktree", "add", path.path, branch], in: url, timeout: .seconds(600))
+    }
+
+    /// Current working-tree status of a worktree, read fresh (not from a snapshot).
+    public func workingTreeStatus(path: String) async throws -> WorkingTreeStatus {
+        GitParsers.parseStatus(
+            try await git.output(["status", "--porcelain=v2", "--branch"], in: URL(fileURLWithPath: path))
+        ).status
+    }
+
+    /// Deletes a linked worktree's folder and git's record of it; the branch is kept.
+    /// Without `discardingChanges`, git refuses when there are uncommitted or untracked files.
+    public func removeWorktree(path: String, discardingChanges: Bool) async throws {
+        let args = ["worktree", "remove"] + (discardingChanges ? ["--force"] : []) + [path]
+        try await git.run(args, in: url, timeout: .seconds(120))
+    }
+
+    /// Forgets worktrees whose folders no longer exist.
+    public func pruneWorktrees() async throws {
+        try await git.run(["worktree", "prune"], in: url)
     }
 
     // MARK: - Clone

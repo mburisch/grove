@@ -246,6 +246,61 @@ public enum GitParsers {
         return Progress(phase: name, fraction: phase.start + phase.span * percent / 100)
     }
 
+    // MARK: diff (unified)
+
+    /// Lines kept per file diff; the rest are dropped and `FileDiff.truncated` is set.
+    public static let maxDiffLines = 20_000
+
+    /// Parses `git diff` output for one file into hunks with old/new line numbers.
+    public static func parseUnifiedDiff(_ output: String) -> FileDiff {
+        var diff = FileDiff()
+        var hunk: DiffHunk?
+        var oldLine = 0, newLine = 0, count = 0
+        func finishHunk() {
+            if let hunk { diff.hunks.append(hunk) }
+            hunk = nil
+        }
+        for raw in output.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(raw)
+            if line.hasPrefix("@@") {
+                finishHunk()
+                if count >= maxDiffLines { diff.truncated = true; break }
+                if let match = line.firstMatch(of: /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/) {
+                    oldLine = Int(match.1) ?? 0
+                    newLine = Int(match.2) ?? 0
+                }
+                hunk = DiffHunk(header: line, lines: [])
+                continue
+            }
+            if hunk == nil || line.hasPrefix("diff ") {
+                // File header: diff --git, index, ---/+++, mode and rename lines.
+                finishHunk()
+                if line.hasPrefix("Binary files ") || line.hasPrefix("GIT binary patch") { diff.isBinary = true }
+                continue
+            }
+            if count >= maxDiffLines { diff.truncated = true; break }
+            switch line.first {
+            case "+":
+                hunk?.lines.append(DiffLine(kind: .added, oldNumber: nil, newNumber: newLine, text: String(line.dropFirst())))
+                newLine += 1
+            case "-":
+                hunk?.lines.append(DiffLine(kind: .removed, oldNumber: oldLine, newNumber: nil, text: String(line.dropFirst())))
+                oldLine += 1
+            case " ":
+                hunk?.lines.append(DiffLine(kind: .context, oldNumber: oldLine, newNumber: newLine, text: String(line.dropFirst())))
+                oldLine += 1
+                newLine += 1
+            case "\\":
+                hunk?.lines.append(DiffLine(kind: .note, oldNumber: nil, newNumber: nil, text: String(line.dropFirst(2))))
+            default:
+                continue  // The empty string after the final newline.
+            }
+            count += 1
+        }
+        finishHunk()
+        return diff
+    }
+
     // MARK: helpers
 
     private static func splitKeyValue<S: StringProtocol>(_ line: S) -> (String, String) {

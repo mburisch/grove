@@ -12,8 +12,43 @@ enum Pane: Hashable {
     case clone
     case settings
     case gitLog
+    /// One changed file's diff, opened from a worktree's or branch's file list.
+    indirect case diff(DiffRequest)
 
-    var isPage: Bool { self == .clone || self == .settings || self == .gitLog }
+    var isPage: Bool {
+        switch self {
+        case .clone, .settings, .gitLog, .diff: true
+        default: false
+        }
+    }
+}
+
+/// The diff browser for one worktree or branch: changed files in a sidebar, one file's diff beside it.
+struct DiffRequest: Hashable {
+    let repo: String
+    let target: DiffTarget
+    /// The page Back returns to.
+    let returnTo: Pane
+
+    var title: String {
+        switch target {
+        case .worktree(let path): (path as NSString).lastPathComponent
+        case .branch(let name): name
+        }
+    }
+}
+
+enum DiffTarget: Hashable {
+    /// A worktree folder (including the main checkout).
+    case worktree(String)
+    /// A local branch without a worktree; files open as read-only copies.
+    case branch(String)
+}
+
+/// One file in the diff browser and the comparison it belongs to.
+struct DiffSelection: Hashable {
+    let file: FileChange
+    let scope: DiffScope
 }
 
 @MainActor @Observable
@@ -41,6 +76,9 @@ final class AppModel {
     private(set) var details: [String: WorktreeDetails] = [:]
     /// Details of branches without a worktree, keyed by `branchKey`, loaded when a branch is inspected.
     private(set) var branchDetails: [String: WorktreeDetails] = [:]
+    /// The file shown in the `.diff` pane and its diff (nil while it loads).
+    private(set) var diffSelection: DiffSelection?
+    private(set) var currentDiff: FileDiff?
 
     @ObservationIgnored private let store = ConfigStore()
     @ObservationIgnored private var scheduler: Task<Void, Never>?
@@ -212,6 +250,8 @@ final class AppModel {
         switch pane {
         case .repo(let path), .worktree(let path, _), .branch(let path, _):
             if repo(at: path) == nil { pane = nil }
+        case .diff(let request):
+            if repo(at: request.repo) == nil { pane = nil }
         default: break
         }
         for repo in added { Task { await refresh(repo) } }
@@ -261,6 +301,9 @@ final class AppModel {
                 if let main = snapshot.mainWorktree { await loadDetails(repo, worktreePath: main.path) }
             case .branch(let path, let name) where path == repo.path:
                 await loadDetails(repo, branch: name)
+            case .diff(let request) where request.repo == repo.path:
+                await loadDetails(repo, target: request.target)
+                if let selection = diffSelection { await loadDiff(selection, in: repo) }
             default: break
             }
         } catch {
@@ -296,6 +339,69 @@ final class AppModel {
                 Task { await loadDetails(repo, worktreePath: main.path) }
             }
         default: break
+        }
+    }
+
+    /// Opens the diff browser, showing `selection` or else the first changed file.
+    func showDiffs(_ request: DiffRequest, selecting selection: DiffSelection? = nil) {
+        guard let repo = repo(at: request.repo) else { return }
+        pane = .diff(request)
+        diffSelection = nil
+        currentDiff = nil
+        Task {
+            if diffSections(for: request).isEmpty { await loadDetails(repo, target: request.target) }
+            guard pane == .diff(request) else { return }
+            if let first = selection ?? diffSections(for: request).lazy.compactMap({ section in
+                section.files.first.map { DiffSelection(file: $0, scope: section.scope) }
+            }).first {
+                selectDiffFile(first)
+            }
+        }
+    }
+
+    func selectDiffFile(_ selection: DiffSelection) {
+        guard case .diff(let request) = pane, let repo = repo(at: request.repo) else { return }
+        diffSelection = selection
+        currentDiff = nil
+        Task { await loadDiff(selection, in: repo) }
+    }
+
+    private func loadDiff(_ selection: DiffSelection, in repo: RepoState) async {
+        let diff = await repository(repo).fileDiff(selection.file, scope: selection.scope)
+        // Ignore a slow load after another file was selected.
+        if diffSelection == selection { currentDiff = diff }
+    }
+
+    private func loadDetails(_ repo: RepoState, target: DiffTarget) async {
+        switch target {
+        case .worktree(let path): await loadDetails(repo, worktreePath: path)
+        case .branch(let name): await loadDetails(repo, branch: name)
+        }
+    }
+
+    struct DiffSection: Identifiable {
+        let title: String
+        let scope: DiffScope
+        let files: [FileChange]
+        var id: String { title }
+    }
+
+    /// The browser's sidebar, built from the same details as the Inspector's file lists.
+    func diffSections(for request: DiffRequest) -> [DiffSection] {
+        let primary = repo(at: request.repo)?.snapshot?.baseRef
+        switch request.target {
+        case .worktree(let path):
+            guard let details = details[path] else { return [] }
+            var sections = [DiffSection(title: "Uncommitted", scope: .uncommitted(worktree: path), files: details.uncommitted)]
+            if let primary {
+                sections.append(DiffSection(title: "Changed vs \(primary)", scope: .sinceBase(worktree: path, primaryRef: primary),
+                                            files: details.changedSinceBase))
+            }
+            return sections
+        case .branch(let name):
+            guard let primary, let details = branchDetails[Self.branchKey(request.repo, name)] else { return [] }
+            return [DiffSection(title: "Changed vs \(primary)", scope: .branch(name: name, primaryRef: primary),
+                                files: details.changedSinceBase)]
         }
     }
 
@@ -435,23 +541,18 @@ final class AppModel {
         }
     }
 
-    /// Creates a worktree next to the repository (`<repo>-<branch>`) and opens it.
-    func createWorktree(_ repo: RepoState, branch: String, openWith launcher: Launcher?) async {
-        let base = repo.url.deletingLastPathComponent()
-        let slug = branch.replacingOccurrences(of: "/", with: "-")
-        var target = base.appendingPathComponent("\(repo.name)-\(slug)")
-        var n = 2
-        while FileManager.default.fileExists(atPath: target.path) {
-            target = base.appendingPathComponent("\(repo.name)-\(slug)-\(n)")
-            n += 1
+    /// Creates a worktree for `branch` in `destination`, a new folder the user chose. Never picks a
+    /// location itself and never opens anything.
+    func createWorktree(_ repo: RepoState, branch: String, at destination: URL) async {
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            repo.lastError = "\(destination.path.abbreviatingWithTilde) already exists; choose a new folder for the worktree"
+            return
         }
-        let destination = target
         await repo.enqueue("Creating worktree…") { [self] in
             do {
                 try await repository(repo).addWorktree(branch: branch, at: destination)
                 repo.lastMessage = "Created worktree \(destination.path.abbreviatingWithTilde)"
                 collapsed.remove(repo.path)
-                if let launcher { open(destination.path, with: launcher) }
                 await loadSnapshot(repo)
                 if let wt = repo.snapshot?.worktrees.first(where: { $0.branch == branch && !$0.isMain }) {
                     select(.worktree(repo: repo.path, path: wt.path))
@@ -462,6 +563,80 @@ final class AppModel {
             }
             await loadSnapshot(repo)
         }
+    }
+
+    /// Asks for confirmation, then deletes a linked worktree's folder. The branch and its commits stay.
+    /// The confirmation reads the status fresh and says if uncommitted or untracked changes would be lost.
+    func confirmRemoveWorktree(_ repo: RepoState, worktree: WorktreeInfo) async {
+        guard !worktree.isMain, !worktree.isLocked else { return }
+        let git = repository(repo)
+        let name = worktree.branch ?? "detached @ \(worktree.head.prefix(7))"
+        let folder = worktree.path.abbreviatingWithTilde
+
+        let alert = NSAlert()
+        alert.messageText = "Remove the worktree for \(name)?"
+        let keeps = worktree.branch.map { "The branch \($0) and its commits stay in the repository." }
+            ?? "Its detached commit stays in the repository only while something else refers to it."
+        var dirty = false
+        if worktree.isPrunable || !FileManager.default.fileExists(atPath: worktree.path) {
+            alert.informativeText = "The folder \(folder) is already gone. This only removes git's record of it.\n\n\(keeps)"
+            alert.addButton(withTitle: "Remove")
+        } else {
+            let status: WorkingTreeStatus
+            do {
+                status = try await git.workingTreeStatus(path: worktree.path)
+            } catch {
+                repo.fail(error)
+                return
+            }
+            dirty = !status.isClean
+            if dirty {
+                alert.alertStyle = .critical
+                alert.informativeText = "This worktree has uncommitted changes: \(Self.describe(status)). "
+                    + "They will be lost.\n\nThe folder \(folder) will be deleted. \(keeps)"
+                alert.addButton(withTitle: "Discard Changes and Remove")
+            } else {
+                alert.informativeText = "There are no uncommitted changes.\n\nThe folder \(folder) will be deleted. \(keeps)"
+                alert.addButton(withTitle: "Remove")
+            }
+        }
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.last?.keyEquivalent = "\u{1b}"
+        NSApp.activate()
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let missing = worktree.isPrunable || !FileManager.default.fileExists(atPath: worktree.path)
+        await repo.enqueue("Removing worktree…") { [self] in
+            do {
+                if missing {
+                    try await git.pruneWorktrees()
+                } else {
+                    try await git.removeWorktree(path: worktree.path, discardingChanges: dirty)
+                }
+                repo.lastMessage = "Removed worktree \(folder)"
+            } catch {
+                repo.fail(error)
+            }
+            await loadSnapshot(repo)
+            if pane == .worktree(repo: repo.path, path: worktree.path),
+               !(repo.snapshot?.worktrees.contains { $0.path == worktree.path } ?? false) {
+                // Show the branch it had checked out, now without a worktree.
+                if let branch = worktree.branch, repo.snapshot?.branches.contains(where: { $0.name == branch }) == true {
+                    select(.branch(repo: repo.path, name: branch))
+                } else {
+                    select(.repo(repo.path))
+                }
+            }
+        }
+    }
+
+    private static func describe(_ status: WorkingTreeStatus) -> String {
+        var parts: [String] = []
+        if status.conflicted > 0 { parts.append("\(status.conflicted) conflicted") }
+        if status.staged > 0 { parts.append("\(status.staged) staged") }
+        if status.unstaged > 0 { parts.append("\(status.unstaged) modified") }
+        if status.untracked > 0 { parts.append("\(status.untracked) untracked") }
+        return parts.joined(separator: ", ")
     }
 
     func setFetchInterval(_ minutes: Int?, for repo: RepoState) {
@@ -545,6 +720,22 @@ final class AppModel {
             process.arguments = ["-lc", Launcher.expand(template, path: path)]
             process.currentDirectoryURL = url
             do { try process.run() } catch { configError = "\(launcher.name): \(error.localizedDescription.unescapingUnicode)" }
+        }
+    }
+
+    /// Opens a file as it is on a branch that has no worktree: the branch's version is written to a
+    /// read-only copy under Caches/Grove/Branches/<repo>/<branch>/ and that copy is opened.
+    func openFile(_ path: String, onBranch branch: String, in repo: RepoState, with launcher: Launcher) async {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let copy = caches.appendingPathComponent("Grove/Branches", isDirectory: true)
+            .appendingPathComponent(repo.name, isDirectory: true)
+            .appendingPathComponent(branch.replacingOccurrences(of: "/", with: "-"), isDirectory: true)
+            .appendingPathComponent(path)
+        do {
+            try await repository(repo).exportFile(path, at: "refs/heads/\(branch)", to: copy)
+            open(copy.path, with: launcher)
+        } catch {
+            repo.fail(error)
         }
     }
 

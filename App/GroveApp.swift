@@ -132,7 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Hides the panel unless a modal (folder picker) or sheet launched from it is up.
     private func hideUnlessBusy() {
         guard let panel, panel.isVisible, NSApp.modalWindow == nil, panel.attachedSheet == nil,
-              !(NSApp.keyWindow is NSOpenPanel) else { return }
+              !(NSApp.keyWindow is NSSavePanel) else { return }  // includes NSOpenPanel
         hidePanel()
     }
 
@@ -248,5 +248,19 @@ enum Panels {
         if let path { panel.directoryURL = URL(fileURLWithPath: path.expandingTilde) }
         NSApp.activate()
         return panel.runModal() == .OK ? panel.urls : []
+    }
+
+    /// Asks for the location and name of a folder that doesn't exist yet. Nothing is prefilled.
+    @MainActor
+    static func chooseNewFolder(title: String, prompt: String, message: String) -> URL? {
+        let panel = NSSavePanel()
+        panel.title = title
+        panel.prompt = prompt
+        panel.message = message
+        panel.nameFieldLabel = "Folder:"
+        panel.nameFieldStringValue = ""
+        panel.canCreateDirectories = true
+        NSApp.activate()
+        return panel.runModal() == .OK ? panel.url : nil
     }
 }

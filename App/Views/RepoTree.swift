@@ -474,7 +474,6 @@ private struct BranchTreeRow: View {
                     }
                     .disabled(tracking.ahead > 0 || repo.activity != nil)
                 }
-                WorktreeLaunchMenu(repo: repo, branch: branch.name)
             }
             .frame(width: Column.actions, alignment: .trailing)
         }
@@ -499,48 +498,14 @@ struct BranchContextMenu: View {
     let branch: BranchInfo
 
     var body: some View {
-        Button("Create Worktree") { Task { await model.createWorktree(repo, branch: branch.name, openWith: nil) } }
-        ForEach(model.availableLaunchers) { launcher in
-            Button("Create Worktree & Open in \(launcher.name)") {
-                Task { await model.createWorktree(repo, branch: branch.name, openWith: launcher) }
-            }
-        }
+        // No "Create Worktree" here: that's only the button on the branch's page, which asks for a folder.
         if let tracking = branch.tracking, tracking.behind > 0, tracking.ahead == 0 {
-            Divider()
             Button("Fast-Forward to \(branch.upstream ?? "Upstream")") {
                 Task { await model.fastForward(repo, branch: branch) }
             }
-        }
-        Divider()
-        Button("Copy Branch Name") { copyToPasteboard(branch.name) }
-    }
-}
-
-/// For a branch without a worktree: create one next to the repo and open it.
-struct WorktreeLaunchMenu: View {
-    @Environment(AppModel.self) private var model
-    let repo: RepoState
-    let branch: String
-
-    var body: some View {
-        Menu {
-            ForEach(model.availableLaunchers) { launcher in
-                Button("Create Worktree & Open in \(launcher.name)") {
-                    Task { await model.createWorktree(repo, branch: branch, openWith: launcher) }
-                }
-            }
             Divider()
-            Button("Create Worktree") {
-                Task { await model.createWorktree(repo, branch: branch, openWith: nil) }
-            }
-        } label: {
-            Image(systemName: "plus.rectangle.on.folder")
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Create a worktree for \(branch)")
-        .disabled(repo.activity != nil)
+        Button("Copy Branch Name") { copyToPasteboard(branch.name) }
     }
 }
 

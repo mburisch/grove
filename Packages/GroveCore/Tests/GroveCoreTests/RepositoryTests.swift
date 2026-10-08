@@ -188,6 +188,32 @@ struct RepositoryTests {
         #expect(details.commitsAhead.map(\.subject) == ["change feature.txt"])
         #expect(details.changedSinceBase.map(\.path) == ["feature.txt"])
         #expect(details.uncommitted.isEmpty)
+
+        // The branch's version of a file can be written out while main is checked out.
+        let copy = sb.root.appendingPathComponent("copies/feature.txt")
+        try await repo.exportFile("feature.txt", at: "refs/heads/feature", to: copy)
+        #expect(try String(contentsOf: copy, encoding: .utf8) == "one\ntwo\n")
+        try await repo.exportFile("feature.txt", at: "refs/heads/feature", to: copy)  // replaces the read-only copy
+    }
+
+    @Test func removeWorktreeKeepsBranchAndRefusesDirtyTree() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        let repo = try await sb.clone("remove", mode: .full)
+        try await sb.git.run(["branch", "feature"], in: repo.url)
+        let wt = sb.root.appendingPathComponent("remove-feature")
+        try await repo.addWorktree(branch: "feature", at: wt)
+
+        try "x".write(to: wt.appendingPathComponent("scratch.txt"), atomically: true, encoding: .utf8)
+        #expect(try await repo.workingTreeStatus(path: wt.path).untracked == 1)
+        await #expect(throws: GitError.self) { try await repo.removeWorktree(path: wt.path, discardingChanges: false) }
+        #expect(FileManager.default.fileExists(atPath: wt.path))
+
+        try await repo.removeWorktree(path: wt.path, discardingChanges: true)
+        #expect(!FileManager.default.fileExists(atPath: wt.path))
+        let snap = try await repo.snapshot()
+        #expect(snap.worktrees.count == 1)
+        #expect(snap.branches.contains { $0.name == "feature" && $0.worktreePath == nil })
     }
 
     @Test func shallowCloneStaysShallowAcrossFetch() async throws {

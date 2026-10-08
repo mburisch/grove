@@ -15,6 +15,11 @@ struct PopoverRoot: View {
             }
             if model.pane == .gitLog {
                 Page(title: "Git Output", maxWidth: .infinity) { GitOutputView() }
+            } else if case .diff(let request) = model.pane {
+                Page(title: "Changes in \(diffTitle(request))", maxWidth: .infinity,
+                     onBack: { model.select(request.returnTo) }) {
+                    DiffBrowser(request: request)
+                }
             } else if let pane = model.pane, pane.isPage {
                 Page(title: pane == .clone ? "Clone Repository" : "Settings") {
                     if pane == .clone { CloneView() } else { SettingsView() }
@@ -39,17 +44,30 @@ struct PopoverRoot: View {
     }
 }
 
+extension PopoverRoot {
+    /// The worktree's branch, or the branch name for a branch without a worktree.
+    private func diffTitle(_ request: DiffRequest) -> String {
+        if case .worktree(let path) = request.target,
+           let branch = model.repo(at: request.repo)?.snapshot?.worktrees.first(where: { $0.path == path })?.branch {
+            return branch
+        }
+        return request.title
+    }
+}
+
 /// Full-width page (clone, settings) with a back button.
 private struct Page<Content: View>: View {
     @Environment(AppModel.self) private var model
     let title: String
     var maxWidth: CGFloat = 640
+    /// Defaults to closing the page.
+    var onBack: (() -> Void)?
     @ViewBuilder let content: Content
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Button { model.pane = nil } label: { Label("Back", systemImage: "chevron.left") }
+                Button { if let onBack { onBack() } else { model.pane = nil } } label: { Label("Back", systemImage: "chevron.left") }
                     .buttonStyle(.borderless)
                 Text(title).font(.headline)
                 Spacer()
