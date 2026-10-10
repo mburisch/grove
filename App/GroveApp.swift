@@ -59,24 +59,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let fetch = NSMenuItem(title: "Fetch All", action: #selector(fetchAll), keyEquivalent: "")
         fetch.target = self
         menu.addItem(fetch)
-        let groups = model.config.groups
-        if !groups.isEmpty {
-            let sections = model.config.sections(for: model.repos.map(\.path))
-            let ungrouped = sections.last { $0.group == nil }?.repos.count ?? 0
-            menu.addItem(.separator())
-            for group in groups {
-                let item = NSMenuItem(title: "Fetch \(group.name)", action: #selector(fetchGroup(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = group.id
-                item.isEnabled = sections.contains { $0.group?.id == group.id && !$0.repos.isEmpty }
-                menu.addItem(item)
-            }
-            if ungrouped > 0 {
-                let item = NSMenuItem(title: "Fetch Ungrouped", action: #selector(fetchGroup(_:)), keyEquivalent: "")
-                item.target = self
-                menu.addItem(item)
-            }
-        }
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Grove", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
@@ -84,11 +66,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func fetchAll() {
         Task { await model.fetchAll() }
-    }
-
-    @objc private func fetchGroup(_ sender: NSMenuItem) {
-        let group = sender.representedObject as? RepoGroup.ID
-        Task { await model.fetch(group: group) }
     }
 
     func showWindow() {
