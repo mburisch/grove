@@ -30,14 +30,17 @@ struct MainView: View {
                 Divider()
             }
             if model.pane == .gitLog {
-                Page(title: "Git Output", maxWidth: .infinity) { GitOutputView() }
+                Page(maxWidth: .infinity) { Text("Git Output").font(.headline) } content: { GitOutputView() }
             } else if case .diff(let request) = model.pane {
-                Page(title: "Changes in \(diffTitle(request))", maxWidth: .infinity,
-                     onBack: { model.select(request.returnTo) }) {
+                Page(maxWidth: .infinity, onBack: { model.select(request.returnTo) }) {
+                    DiffTitle(request: request)
+                } content: {
                     DiffBrowser(request: request)
                 }
             } else if let pane = model.pane, pane.isPage {
-                Page(title: pane == .clone ? "Clone Repository" : "Settings") {
+                Page {
+                    Text(pane == .clone ? "Clone Repository" : "Settings").font(.headline)
+                } content: {
                     if pane == .clone { CloneView() } else { SettingsView() }
                 }
             } else {
@@ -54,24 +57,41 @@ struct MainView: View {
     }
 }
 
-extension MainView {
-    /// The worktree's branch, or the branch name for a branch without a worktree.
-    private func diffTitle(_ request: DiffRequest) -> String {
-        if case .worktree(let path) = request.target,
-           let branch = model.repo(at: request.repo)?.snapshot?.worktrees.first(where: { $0.path == path })?.branch {
-            return branch
+/// "repo / branch" with the branch's distance from the primary branch.
+private struct DiffTitle: View {
+    @Environment(AppModel.self) private var model
+    let request: DiffRequest
+
+    var body: some View {
+        let repo = model.repo(at: request.repo)
+        HStack(spacing: 6) {
+            if let repo {
+                Text(repo.name).foregroundStyle(.secondary)
+                Text("/").foregroundStyle(.tertiary)
+            }
+            switch request.target {
+            case .worktree(let path):
+                let worktree = repo?.snapshot?.worktrees.first { $0.path == path }
+                // The worktree's branch rather than its folder name.
+                Text(worktree?.branch ?? request.title).font(.headline).fontDesign(.monospaced)
+                AheadBehindBadge(value: worktree?.versusPrimary, showSynced: false, chip: true)
+            case .branch(let name):
+                Text(name).font(.headline).fontDesign(.monospaced)
+                AheadBehindBadge(value: repo?.snapshot?.branches.first { $0.name == name }?.versusPrimary,
+                                 showSynced: false, chip: true)
+            }
         }
-        return request.title
+        .lineLimit(1)
     }
 }
 
 /// Full-width page (clone, settings) with a back button.
-private struct Page<Content: View>: View {
+private struct Page<Title: View, Content: View>: View {
     @Environment(AppModel.self) private var model
-    let title: String
     var maxWidth: CGFloat = 640
     /// Defaults to closing the page.
     var onBack: (() -> Void)?
+    @ViewBuilder let title: Title
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -79,7 +99,7 @@ private struct Page<Content: View>: View {
             HStack {
                 Button { if let onBack { onBack() } else { model.pane = nil } } label: { Label("Back", systemImage: "chevron.left") }
                     .buttonStyle(.borderless)
-                Text(title).font(.headline)
+                title
                 Spacer()
             }
             .padding(.horizontal, 12)
@@ -94,6 +114,7 @@ private struct Page<Content: View>: View {
 
 private struct HeaderBar: View {
     @Environment(AppModel.self) private var model
+    @FocusState private var filterFocused: Bool
 
     var body: some View {
         @Bindable var model = model
@@ -103,9 +124,30 @@ private struct HeaderBar: View {
                 .foregroundStyle(.tint)
             Text("Grove").font(.headline)
 
-            TextField("Filter", text: $model.filter)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 200)
+            HStack(spacing: 5) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Filter", text: $model.filter)
+                    .textFieldStyle(.plain)
+                    .focused($filterFocused)
+                if model.filter.isEmpty {
+                    Text("⌘F").font(.caption2).foregroundStyle(.tertiary)
+                } else {
+                    Button { model.filter = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("Clear the filter")
+                }
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+            .frame(width: 240)
+            .background {
+                Button("Filter") { filterFocused = true }
+                    .keyboardShortcut("f")
+                    .opacity(0)
+                    .accessibilityHidden(true)
+            }
 
             if !model.isOnline {
                 Label("Offline", systemImage: "wifi.slash")
@@ -119,14 +161,21 @@ private struct HeaderBar: View {
             }
             .keyboardShortcut("r")
             .help("Reload local status, branches and worktrees (no network) — ⌘R")
-            Button { Task { await model.fetchAll() } } label: {
-                Label("Fetch All", systemImage: "arrow.down.circle")
+            // The two network actions, set apart from the local refresh and the icon buttons.
+            ControlGroup {
+                Button { Task { await model.fetchAll() } } label: {
+                    Label("Fetch All", systemImage: "arrow.down.circle")
+                }
+                .help("Fetch all repositories")
+                Button { Task { await model.pullAll() } } label: {
+                    Label("Pull All", systemImage: "arrow.down.to.line")
+                }
+                .help("Fetch and fast-forward all clean checkouts")
             }
-            .help("Fetch all repositories")
-            Button { Task { await model.pullAll() } } label: {
-                Label("Pull All", systemImage: "arrow.down.to.line")
-            }
-            .help("Fetch and fast-forward all clean checkouts")
+            .labelStyle(.titleAndIcon)
+            .controlSize(.small)
+            .fixedSize()
+            Divider().frame(height: 14)
 
             Menu {
                 Button("Clone Repository…") { model.pane = .clone }

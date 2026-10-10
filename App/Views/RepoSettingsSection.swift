@@ -17,7 +17,7 @@ struct RepoSettingsSection: View {
                 withAnimation { expanded.toggle() }
             } label: {
                 HStack(spacing: 4) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption)
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
                     SectionTitle("Settings")
                     Spacer()
                     Text(summary(settings, custom)).font(.caption).foregroundStyle(.secondary)
@@ -44,83 +44,66 @@ struct RepoSettingsSection: View {
 
     @ViewBuilder
     private func grid(_ settings: EffectiveRepoSettings, _ custom: RepoSettings) -> some View {
-        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 8) {
-            GridRow {
-                Text("Profile").foregroundStyle(.secondary)
-                HStack {
-                    Text(profileText(settings, custom))
-                    Spacer()
-                    Menu("Use Defaults") {
-                        Button("Normal Repository") { model.applyDefaults(.normal, to: repo) }
-                        Button("Large Repository") { model.applyDefaults(.large, to: repo) }
-                        Divider()
-                        Button("Automatic (by Size)") { model.applyDefaults(nil, to: repo) }
-                    }
-                    .fixedSize()
-                    .help("Reset every setting below to the defaults for a normal or a large repository")
+        Card {
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(Text("Profile").foregroundStyle(.secondary)) \(Text(settings.profile.label).fontWeight(.semibold))")
+                    Text(profileNote(custom)).font(.caption).foregroundStyle(.secondary)
                 }
+                Spacer(minLength: 8)
+                Menu("Use Defaults") {
+                    Button("Normal Repository") { model.applyDefaults(.normal, to: repo) }
+                    Button("Large Repository") { model.applyDefaults(.large, to: repo) }
+                    Divider()
+                    Button("Automatic (by Size)") { model.applyDefaults(nil, to: repo) }
+                }
+                .fixedSize()
+                .help("Reset every setting below to the defaults for a normal or a large repository")
             }
-            GridRow {
-                Text("Auto-fetch").foregroundStyle(.secondary)
+            CardRow("Auto-fetch") {
                 FetchIntervalPicker(repo: repo)
             }
-            GridRow {
-                Text("Fetch").foregroundStyle(.secondary)
-                Picker("Fetch", selection: binding(settings.fetchScope) { $0.fetchScope = $1 }) {
-                    Text("All branches").tag(FetchScope.all)
-                    Text("Primary and local branches").tag(FetchScope.primaryAndLocal)
+            CardRow("Fetch") {
+                // The checkbox sits under the menu it refines.
+                VStack(alignment: .trailing, spacing: 6) {
+                    Picker("Fetch", selection: binding(settings.fetchScope) { $0.fetchScope = $1 }) {
+                        Text("All branches").tag(FetchScope.all)
+                        Text("Primary and local branches").tag(FetchScope.primaryAndLocal)
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .help("Primary and local branches downloads only \(repo.snapshot?.primaryBranch ?? "the primary branch") "
+                          + "and the upstreams of your local branches, instead of every branch on the remote")
+                    Toggle("Fetch tags", isOn: binding(settings.fetchTags) { $0.fetchTags = $1 })
                 }
-                .labelsHidden()
-                .fixedSize()
-                .help("Primary and local branches downloads only \(repo.snapshot?.primaryBranch ?? "the primary branch") "
-                      + "and the upstreams of your local branches, instead of every branch on the remote")
             }
-            GridRow {
-                Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
-                Toggle("Fetch tags", isOn: binding(settings.fetchTags) { $0.fetchTags = $1 })
-            }
-            GridRow {
-                Text("Compare").foregroundStyle(.secondary)
-                Picker("Compare", selection: binding(settings.compareAllBranches) { $0.compareAllBranches = $1 }) {
-                    Text("Recent branches").tag(true)
-                    Text("Worktrees only").tag(false)
+            CardRow("Compare") {
+                VStack(alignment: .trailing, spacing: 6) {
+                    Picker("Compare", selection: binding(settings.compareAllBranches) { $0.compareAllBranches = $1 }) {
+                        Text("Recent branches").tag(true)
+                        Text("Worktrees only").tag(false)
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .help("Which branches show ahead/behind counts against \(repo.snapshot?.baseRef ?? "the primary branch"). "
+                          + "With Worktrees only, other branches are compared when you select them.")
+                    Toggle("Count changed lines", isOn: binding(settings.lineCounts) { $0.lineCounts = $1 })
+                        .help("Shows +/− line counts; each refresh then runs git diff on every worktree")
                 }
-                .labelsHidden()
-                .fixedSize()
-                .help("Which branches show ahead/behind counts against \(repo.snapshot?.baseRef ?? "the primary branch"). "
-                      + "With Worktrees only, other branches are compared when you select them.")
             }
-            GridRow {
-                Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
-                Toggle("Count changed lines", isOn: binding(settings.lineCounts) { $0.lineCounts = $1 })
-                    .help("Shows +/− line counts; each refresh then runs git diff on every worktree")
-            }
-            storageRows
-        }
-        .font(.callout)
-        .controlSize(.small)
-        .disabled(repo.activity != nil)
-    }
-
-    @ViewBuilder
-    private var storageRows: some View {
-        GridRow {
-            Text("Storage").foregroundStyle(.secondary)
-            HStack {
-                if let storage = repo.storage {
-                    Text(AppModel.describe(storage))
-                        .foregroundStyle(storage.needsCleanUp ? .orange : .primary)
-                } else {
-                    Text("unknown").foregroundStyle(.secondary)
+            CardRow("Storage") {
+                HStack(spacing: 8) {
+                    if let storage = repo.storage {
+                        Text(AppModel.describe(storage))
+                            .foregroundStyle(storage.needsCleanUp ? .orange : .primary)
+                    } else {
+                        Text("unknown").foregroundStyle(.secondary)
+                    }
+                    Button("Clean Up…") { Task { await model.confirmCleanUp(repo) } }
+                        .help("Run git gc to repack and drop unreachable data")
                 }
-                Spacer()
-                Button("Clean Up…") { Task { await model.confirmCleanUp(repo) } }
-                    .help("Run git gc to repack and drop unreachable data")
             }
-        }
-        if let prefetch = repo.prefetch, prefetch.scheduled {
-            GridRow {
-                Text("Prefetch").foregroundStyle(.secondary)
+            if let prefetch = repo.prefetch, prefetch.scheduled {
                 VStack(alignment: .leading, spacing: 2) {
                     Toggle("Background prefetch (git maintenance)", isOn: Binding(
                         get: { prefetch.enabled },
@@ -135,15 +118,14 @@ struct RepoSettingsSection: View {
                 }
             }
         }
+        .font(.callout)
+        .controlSize(.small)
+        .disabled(repo.activity != nil)
     }
 
-    private func profileText(_ settings: EffectiveRepoSettings, _ custom: RepoSettings) -> String {
-        var text = settings.profile.label
-        if custom.profile == nil {
-            text += " (by size)"
-        }
-        if custom.hasOverrides { text += ", customized" }
-        return text
+    private func profileNote(_ custom: RepoSettings) -> String {
+        (custom.profile == nil ? "Chosen by repository size" : "Set for this repository")
+            + (custom.hasOverrides ? ", customized" : "")
     }
 
     /// Shows the effective value; choosing one stores it as this repository's own setting.

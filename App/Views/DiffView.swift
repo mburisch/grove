@@ -61,10 +61,13 @@ private struct SidebarFileRow: View {
     var body: some View {
         HStack(spacing: 6) {
             Text(file.status)
+                .font(.caption2.weight(.bold).monospaced())
                 .foregroundStyle(statusColor(file.status))
-                .frame(width: 12)
+                .frame(width: 16, height: 16)
+                .background(statusColor(file.status).opacity(0.18), in: RoundedRectangle(cornerRadius: 4))
             VStack(alignment: .leading, spacing: 0) {
                 Text((file.path as NSString).lastPathComponent)
+                    .fontWeight(.medium)
                     .lineLimit(1)
                     .strikethrough(file.isDeleted)
                 let directory = (file.path as NSString).deletingLastPathComponent
@@ -75,7 +78,7 @@ private struct SidebarFileRow: View {
             }
             Spacer(minLength: 4)
             if let ins = file.insertions, let del = file.deletions {
-                VStack(alignment: .trailing, spacing: 0) {
+                HStack(spacing: 3) {
                     if ins > 0 { Text("+\(ins)").foregroundStyle(.green) }
                     if del > 0 { Text("−\(del)").foregroundStyle(.red) }
                 }
@@ -177,6 +180,7 @@ private struct FileDiffView: View {
     private func body(lines: [DiffLine], segments: [DiffSegment], starts: [Int]) -> some View {
         let highlighted = current.flatMap { blockRange(starts[$0], in: lines) }
         let gutter = gutterWidth(lines)
+        let spans = changedSpans(lines)
         return ScrollViewReader { proxy in
             ScrollView([.vertical, .horizontal]) {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -187,7 +191,8 @@ private struct FileDiffView: View {
                         case .folded(let range), .lines(let range):
                             ForEach(range, id: \.self) { index in
                                 DiffLineRow(line: lines[index], gutter: gutter,
-                                            highlighted: highlighted?.contains(index) ?? false)
+                                            highlighted: highlighted?.contains(index) ?? false,
+                                            changed: spans[index])
                                     .id(index)
                             }
                         }
@@ -250,11 +255,11 @@ private struct FoldRow: View {
         Button(action: expand) {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.up.and.down")
-                Text("\(count) unchanged lines")
+                Text("Show \(count) unchanged lines")
             }
             .foregroundStyle(hovering ? .primary : .secondary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.accentColor.opacity(hovering ? 0.16 : 0.08))
             .contentShape(Rectangle())
@@ -269,6 +274,8 @@ private struct DiffLineRow: View {
     let line: DiffLine
     let gutter: CGFloat
     let highlighted: Bool
+    /// Character offsets of the part that differs from the line's counterpart, if it has one.
+    let changed: Range<Int>?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -277,8 +284,8 @@ private struct DiffLineRow: View {
                 .frame(width: 3)
             number(line.oldNumber)
             number(line.newNumber)
-            Text(marker).foregroundStyle(markerColor).frame(width: 14)
-            Text(line.text.isEmpty ? " " : line.text)
+            Text(marker).fontWeight(.bold).foregroundStyle(markerColor).frame(width: 14)
+            Text(text)
                 .foregroundStyle(line.kind == .note ? .secondary : .primary)
                 .italic(line.kind == .note)
                 .fixedSize()
@@ -289,9 +296,19 @@ private struct DiffLineRow: View {
         .background(background)
     }
 
+    private var text: AttributedString {
+        var text = AttributedString(line.text.isEmpty ? " " : line.text)
+        if let changed {
+            let start = text.index(text.startIndex, offsetByCharacters: changed.lowerBound)
+            let end = text.index(text.startIndex, offsetByCharacters: changed.upperBound)
+            text[start..<end].backgroundColor = markerColor.opacity(0.35)
+        }
+        return text
+    }
+
     private func number(_ n: Int?) -> some View {
         Text(n.map(String.init) ?? "")
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(line.kind == .added || line.kind == .removed ? HierarchicalShapeStyle.secondary : .tertiary)
             .frame(width: gutter, alignment: .trailing)
             .padding(.trailing, 4)
     }
@@ -329,7 +346,7 @@ private struct DiffHeader: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(file.status).foregroundStyle(statusColor(file.status)).monospaced()
-                    Text(file.oldPath.map { "\($0) → \(file.path)" } ?? file.path)
+                    path
                         .lineLimit(1)
                         .truncationMode(.head)
                         .textSelection(.enabled)
@@ -338,23 +355,24 @@ private struct DiffHeader: View {
                         Text("−\(del)").foregroundStyle(.red)
                     }
                 }
-                .font(.callout.monospacedDigit())
+                .font(.system(.callout, design: .monospaced))
                 Text(caption).font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
             if let navigation, navigation.count > 0 {
                 HStack(spacing: 2) {
+                    Text(navigation.current.map { "Change \($0 + 1) of \(navigation.count)" }
+                         ?? "\(navigation.count) change\(navigation.count == 1 ? "" : "s")")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                        .padding(.trailing, 4)
                     Button(action: navigation.previous) { Image(systemName: "chevron.up") }
                         .keyboardShortcut(.upArrow, modifiers: .option)
                         .help("Previous change (⌥↑)")
                     Button(action: navigation.next) { Image(systemName: "chevron.down") }
                         .keyboardShortcut(.downArrow, modifiers: .option)
                         .help("Next change (⌥↓)")
-                    Text(navigation.current.map { "Change \($0 + 1) of \(navigation.count)" }
-                         ?? "\(navigation.count) change\(navigation.count == 1 ? "" : "s")")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .fixedSize()
                 }
                 .buttonStyle(.borderless)
             }
@@ -385,6 +403,14 @@ private struct DiffHeader: View {
         if case .branch = request.target { true } else { false }
     }
 
+    /// The folder dimmed and the file name emphasized; a rename shows both paths plainly.
+    private var path: Text {
+        if let oldPath = file.oldPath { return Text("\(oldPath) → \(file.path)") }
+        let directory = (file.path as NSString).deletingLastPathComponent
+        let name = Text((file.path as NSString).lastPathComponent).fontWeight(.semibold)
+        return directory.isEmpty ? name : Text("\(Text(directory + "/").foregroundStyle(.secondary))\(name)")
+    }
+
     private var caption: String {
         switch selection.scope {
         case .uncommitted: "Uncommitted changes"
@@ -412,6 +438,36 @@ private func openFile(_ file: FileChange, in request: DiffRequest, with editor: 
     case .worktree(let path):
         model.open((path as NSString).appendingPathComponent(file.path), with: editor)
     }
+}
+
+/// Where a removed line and the added line that replaces it differ, as character offsets keyed
+/// by line index. Only blocks of removed lines followed by as many added lines are paired up.
+private func changedSpans(_ lines: [DiffLine]) -> [Int: Range<Int>] {
+    var spans: [Int: Range<Int>] = [:]
+    var index = 0
+    while index < lines.count {
+        guard lines[index].kind == .removed else { index += 1; continue }
+        var added = index
+        while added < lines.count, lines[added].kind == .removed { added += 1 }
+        var end = added
+        while end < lines.count, lines[end].kind == .added { end += 1 }
+        if added - index == end - added {
+            for offset in 0..<(added - index) {
+                let old = Array(lines[index + offset].text), new = Array(lines[added + offset].text)
+                let shortest = min(old.count, new.count)
+                var prefix = 0
+                while prefix < shortest, old[prefix] == new[prefix] { prefix += 1 }
+                var suffix = 0
+                while suffix < shortest - prefix, old[old.count - 1 - suffix] == new[new.count - 1 - suffix] { suffix += 1 }
+                // Lines sharing nothing but indentation are different lines, not an edit.
+                guard suffix > 0 || old[..<prefix].contains(where: { !$0.isWhitespace }) else { continue }
+                if old.count - suffix > prefix { spans[index + offset] = prefix..<(old.count - suffix) }
+                if new.count - suffix > prefix { spans[added + offset] = prefix..<(new.count - suffix) }
+            }
+        }
+        index = max(end, index + 1)
+    }
+    return spans
 }
 
 private func statusColor(_ status: String) -> Color {

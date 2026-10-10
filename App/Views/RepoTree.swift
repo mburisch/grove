@@ -4,7 +4,6 @@ import SwiftUI
 
 /// Column widths shared by repo, worktree and branch rows so status and actions line up.
 private enum Column {
-    static let status: CGFloat = 130
     static let actions: CGFloat = 78
     static let indent: CGFloat = 20
 }
@@ -51,7 +50,6 @@ struct RepoTree: View {
                 }
             }
             .listStyle(.inset)
-            .alternatingRowBackgrounds()
             .background(DragAutoScroller(active: Binding(
                 get: { model.draggingInTree },
                 set: { model.draggingInTree = $0 }
@@ -200,7 +198,7 @@ private struct GroupHeader: View {
             Text("\(count)")
                 .foregroundStyle(.tertiary)
                 .monospacedDigit()
-            Rectangle().fill(.separator).frame(height: 1)
+            Spacer(minLength: 4)
             IconButton("arrow.down.circle", help: group == nil ? "Fetch all ungrouped repos" : "Fetch all repos in this group") {
                 Task { await model.fetch(group: group?.id) }
             }
@@ -218,7 +216,9 @@ private struct GroupHeader: View {
                 .fixedSize()
             }
         }
-        .font(.subheadline.weight(.semibold))
+        .font(.caption.weight(.semibold))
+        .textCase(.uppercase)
+        .kerning(0.5)
         .foregroundStyle(.secondary)
         .padding(.vertical, 3)
         .padding(.horizontal, 4)
@@ -267,10 +267,12 @@ private struct RepoTreeRow: View {
     let repo: RepoState
     let hasChildren: Bool
     let expanded: Bool
+    @State private var hovering = false
 
     var body: some View {
         let main = repo.mainWorktree
         let primary = repo.snapshot?.primaryBranch
+        let busy = repo.activity != nil || repo.queued != nil
         HStack(spacing: 8) {
             DisclosureChevron(expanded: expanded) {
                 if expanded { model.collapsed.insert(repo.path) } else { model.collapsed.remove(repo.path) }
@@ -285,13 +287,9 @@ private struct RepoTreeRow: View {
                     if let branch = main?.branch {
                         // Orange only when the default branch is known and this is another one.
                         let offPrimary = primary != nil && branch != primary
-                        Text("(\(branch))")
-                            .foregroundStyle(offPrimary ? Color.orange : Color.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .help(branch)
+                        BranchChip(name: branch, highlighted: offPrimary)
                     } else if let main {
-                        Text("(\(main.head.prefix(7)))").foregroundStyle(.orange)
+                        BranchChip(name: String(main.head.prefix(7)), highlighted: true)
                     }
                     if main?.hasCommits == false {
                         Text("no commits").font(.caption).foregroundStyle(.tertiary)
@@ -326,14 +324,35 @@ private struct RepoTreeRow: View {
                 }
                 LaunchIconButton(path: repo.path)
             }
-            .disabled(repo.activity != nil || repo.queued != nil)
+            .disabled(busy)
+            // Only on the row being pointed at or selected, so the list stays quiet.
+            .opacity(hovering || model.pane == .repo(repo.path) ? 1 : 0)
             .frame(width: Column.actions, alignment: .trailing)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
     }
 
     private var fetchHelp: String {
         "Fetch now — " + (repo.lastFetch.map { "last fetched \($0.relative)" } ?? "never fetched")
+    }
+}
+
+/// The checked-out branch on a capsule; orange when it isn't the primary branch.
+private struct BranchChip: View {
+    let name: String
+    let highlighted: Bool
+
+    var body: some View {
+        Chip(tint: highlighted ? .orange : .secondary) {
+            Text(name)
+                .fontDesign(.monospaced)
+                .foregroundStyle(highlighted ? Color.orange : Color.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .help(name)
     }
 }
 
@@ -372,6 +391,13 @@ private struct WorktreeTreeRow: View {
     @Environment(AppModel.self) private var model
     let repo: RepoState
     let worktree: WorktreeInfo
+    @State private var hovering = false
+
+    /// Relative to the repository when the worktree lives inside it.
+    private var shortPath: String {
+        let prefix = repo.path + "/"
+        return worktree.path.hasPrefix(prefix) ? String(worktree.path.dropFirst(prefix.count)) : worktree.path.abbreviatingWithTilde
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -382,6 +408,7 @@ private struct WorktreeTreeRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text(worktree.displayName)
+                        .fontDesign(.monospaced)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     if let pr = worktree.branch.flatMap({ repo.pullRequests[$0] }) {
@@ -391,7 +418,7 @@ private struct WorktreeTreeRow: View {
                         Text("missing").font(.caption).foregroundStyle(.red)
                     }
                 }
-                PathText(path: worktree.path.abbreviatingWithTilde)
+                PathText(path: shortPath, full: worktree.path.abbreviatingWithTilde)
             }
             .padding(.leading, Column.indent)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -406,10 +433,13 @@ private struct WorktreeTreeRow: View {
                     .disabled(worktree.status.hasTrackedChanges || (worktree.tracking?.ahead ?? 0) > 0)
                 }
                 LaunchIconButton(path: worktree.path)
+                    .opacity(hovering || model.pane == .worktree(repo: repo.path, path: worktree.path) ? 1 : 0)
             }
             .frame(width: Column.actions, alignment: .trailing)
         }
         .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
     }
 }
 
@@ -429,8 +459,7 @@ private struct BranchesHeaderRow: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .frame(width: 12)
-                Text("Branches")
-                Text("\(count)").font(.caption).foregroundStyle(.secondary)
+                Text("\(count) branch\(count == 1 ? "" : "es") without a worktree").foregroundStyle(.secondary)
             }
             .padding(.leading, 12 + 8 + Column.indent)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -456,6 +485,7 @@ private struct BranchTreeRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text(branch.name)
+                        .fontDesign(.monospaced)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .help(branch.name)
@@ -474,11 +504,10 @@ private struct BranchTreeRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 6) {
-                Spacer(minLength: 0)
-                if let diff = branch.committedDiff { CompactDiff(stat: diff) }
-                AheadBehindBadge(value: branch.tracking, showSynced: false)
+                if let diff = branch.committedDiff { CompactDiff(stat: diff, chip: true) }
+                AheadBehindBadge(value: branch.tracking, showSynced: false, chip: true)
             }
-            .frame(width: Column.status, alignment: .trailing)
+            .fixedSize()
 
             HStack(spacing: 6) {
                 if let tracking = branch.tracking, tracking.behind > 0 {
@@ -524,18 +553,21 @@ struct BranchContextMenu: View {
 
 private struct PathText: View {
     let path: String
+    /// Shown in the tooltip when `path` is abbreviated.
+    var full: String?
 
     var body: some View {
         Text(path)
-            .font(.caption)
+            .font(.system(.caption, design: .monospaced))
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .truncationMode(.middle)
-            .help(path)
+            .help(full ?? path)
     }
 }
 
-/// Dirty marker, diff vs primary and ahead/behind, right-aligned.
+/// What needs attention on a row, right-aligned: uncommitted work, diff vs primary and
+/// ahead/behind. A clean checkout that is level with its upstream shows nothing.
 private struct StatusCell: View {
     let worktree: WorktreeInfo?
     let activity: String?
@@ -548,7 +580,6 @@ private struct StatusCell: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Spacer(minLength: 0)
             if let activity {
                 ProgressView().controlSize(.small)
                     .help(activity)
@@ -566,18 +597,28 @@ private struct StatusCell: View {
             }
             if let wt = worktree {
                 if wt.status.hasTrackedChanges || wt.status.untracked > 0 {
-                    Image(systemName: wt.status.hasTrackedChanges ? "circle.fill" : "circle")
-                        .font(.system(size: 7))
+                    Chip(tint: .orange) {
+                        HStack(spacing: 4) {
+                            Image(systemName: wt.status.hasTrackedChanges ? "circle.fill" : "circle")
+                                .font(.system(size: 6))
+                            Text(dirtyLabel(wt))
+                        }
                         .foregroundStyle(.orange)
-                        .help(dirtyHelp(wt))
+                    }
+                    .help(dirtyHelp(wt))
                 }
                 if !showTracking {
-                    CompactDiff(stat: wt.committedDiff)
+                    CompactDiff(stat: wt.committedDiff, chip: true)
                 }
-                AheadBehindBadge(value: wt.tracking ?? (showTracking ? wt.versusPrimary : nil), showSynced: showTracking)
+                AheadBehindBadge(value: wt.tracking ?? (showTracking ? wt.versusPrimary : nil), showSynced: false, chip: true)
             }
         }
-        .frame(width: Column.status, alignment: .trailing)
+        .fixedSize()
+    }
+
+    private func dirtyLabel(_ wt: WorktreeInfo) -> String {
+        let tracked = wt.status.staged + wt.status.unstaged + wt.status.conflicted
+        return tracked > 0 ? "\(tracked) changed" : "\(wt.status.untracked) untracked"
     }
 
     private func dirtyHelp(_ wt: WorktreeInfo) -> String {
@@ -595,6 +636,7 @@ private struct StatusCell: View {
 /// "+2 −1" in green/red.
 struct CompactDiff: View {
     let stat: DiffStat
+    var chip = false
 
     var body: some View {
         if !stat.isZero {
@@ -603,6 +645,7 @@ struct CompactDiff: View {
                 Text("−\(stat.deletions)").foregroundStyle(.red)
             }
             .font(.caption.monospacedDigit())
+            .chipBackground(chip ? .secondary : nil)
             .help("\(stat.files) file\(stat.files == 1 ? "" : "s") changed vs primary branch")
         }
     }

@@ -55,11 +55,14 @@ private struct RepoInspector: View {
     @State private var showRemoteBranches = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(repo.name).font(.title2.weight(.semibold)).lineLimit(1)
-                    if let mode = repo.snapshot?.mode { ModeChip(mode: mode) }
+                    ConvertMenu(repo: repo)
+                        .menuStyle(.borderlessButton)
+                        .controlSize(.small)
+                        .fixedSize()
                     Spacer()
                     if let activity = repo.activity {
                         ProgressView().controlSize(.small)
@@ -67,69 +70,62 @@ private struct RepoInspector: View {
                     } else if let queued = repo.queued {
                         Image(systemName: "clock").foregroundStyle(.secondary)
                         Text(queued).font(.caption).foregroundStyle(.secondary)
+                    } else if let main = repo.mainWorktree, main.status.isClean, main.tracking?.isZero == true {
+                        Label("Clean, up to date", systemImage: "checkmark")
+                            .font(.caption)
+                            .foregroundStyle(.green)
                     }
                 }
-                HStack(alignment: .firstTextBaseline) {
-                    Button(repo.displayPath) { NSWorkspace.shared.activateFileViewerSelecting([repo.url]) }
-                        .buttonStyle(.link)
-                        .help("Reveal in Finder")
-                    Spacer()
-                    Button { model.showGitOutput(for: repo) } label: {
-                        Label("Git Output", systemImage: "text.alignleft")
+                PathLine(path: repo.path, display: repo.displayPath)
+                HStack(spacing: 5) {
+                    if let gh = repo.snapshot?.gitHub {
+                        Button(gh.slug) { NSWorkspace.shared.open(gh.webURL) }.buttonStyle(.link)
+                    } else {
+                        Text(repo.snapshot?.remoteURL ?? "no remote").lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                     }
-                    .buttonStyle(.borderless)
-                    .font(.caption)
-                    .help("The git commands run for this repository and what they printed")
+                    Text("·")
+                    Text("primary \(repo.snapshot?.baseRef ?? "none")").lineLimit(1).layoutPriority(1)
+                    Text("·")
+                    Text("fetched \(repo.lastFetch?.relative ?? "never")").lineLimit(1).layoutPriority(1)
                 }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                Button { Task { await model.pull(repo) } } label: {
+                    Label("Pull", systemImage: "arrow.down.to.line").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(repo.activity != nil)
+                .help("Fetch, then fast-forward clean worktrees and branches")
+                Button { Task { await model.fetch(repo) } } label: {
+                    Label("Fetch", systemImage: "arrow.down.circle").frame(maxWidth: .infinity)
+                }
+                .disabled(repo.activity != nil)
+                Button { model.showGitOutput(for: repo) } label: {
+                    Label("Git Output", systemImage: "text.alignleft").frame(maxWidth: .infinity)
+                }
+                .help("The git commands run for this repository and what they printed")
             }
 
             RepoBanners(repo: repo)
 
-            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 6) {
-                GridRow {
-                    Text("Remote").foregroundStyle(.secondary)
-                    if let gh = repo.snapshot?.gitHub {
-                        Button(gh.slug) { NSWorkspace.shared.open(gh.webURL) }.buttonStyle(.link)
-                    } else {
-                        Text(repo.snapshot?.remoteURL ?? "none").lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                    }
-                }
-                GridRow {
-                    Text("Primary").foregroundStyle(.secondary)
-                    Text(repo.snapshot?.baseRef ?? "none")
-                }
-                GridRow {
-                    Text("Fetched").foregroundStyle(.secondary)
-                    Text(repo.lastFetch?.relative ?? "never")
-                }
-            }
-            .font(.callout)
-
-            HStack(spacing: 8) {
-                Button { Task { await model.fetch(repo) } } label: { Label("Fetch", systemImage: "arrow.down.circle") }
-                Button { Task { await model.pull(repo) } } label: { Label("Pull", systemImage: "arrow.down.to.line") }
-                    .help("Fetch, then fast-forward clean worktrees and branches")
-                Spacer()
-                ConvertMenu(repo: repo).fixedSize()
-            }
-            .controlSize(.small)
-            .disabled(repo.activity != nil)
-
-            Divider()
-            RepoSettingsSection(repo: repo)
-
             if let main = repo.mainWorktree {
-                Divider()
-                SectionTitle("Main Checkout")
-                WorktreeSummary(repo: repo, worktree: main)
+                OpenInSection(path: main.path)
+                VStack(alignment: .leading, spacing: 8) {
+                    SectionTitle("Main Checkout")
+                    WorktreeSummary(repo: repo, worktree: main)
+                }
                 WorktreeChanges(repo: repo, worktree: main, details: model.details[main.path], primary: repo.snapshot?.baseRef,
                                 returnTo: .repo(repo.path))
             }
 
+            RepoSettingsSection(repo: repo)
+
             if let snapshot = repo.snapshot {
                 branchSections(snapshot)
             }
-
         }
     }
 
@@ -185,11 +181,7 @@ private struct WorktreeInspector: View {
                     if repo.activity != nil { ProgressView().controlSize(.small) }
                 }
                 Text("Worktree of \(repo.name)").font(.caption).foregroundStyle(.secondary)
-                Button(worktree.path.abbreviatingWithTilde) {
-                    NSWorkspace.shared.activateFileViewerSelecting([worktree.url])
-                }
-                .buttonStyle(.link)
-                .help("Reveal in Finder")
+                PathLine(path: worktree.path, display: worktree.path.abbreviatingWithTilde)
                 // On its own line so the path gets the full width.
                 Button(role: .destructive) {
                     Task { await model.confirmRemoveWorktree(repo, worktree: worktree) }
@@ -210,6 +202,7 @@ private struct WorktreeInspector: View {
                 }
             }
             RepoBanners(repo: repo)
+            OpenInSection(path: worktree.path)
             WorktreeSummary(repo: repo, worktree: worktree)
             WorktreeChanges(repo: repo, worktree: worktree, details: model.details[worktree.path], primary: repo.snapshot?.baseRef,
                             returnTo: .worktree(repo: repo.path, path: worktree.path))
@@ -351,13 +344,55 @@ private struct PullRequestGridRow: View {
     var body: some View {
         GridRow(alignment: .top) {
             Text("Pull request").foregroundStyle(.secondary)
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Button { NSWorkspace.shared.open(pr.url) } label: {
-                    Text("#\(pr.number) \(pr.title)").multilineTextAlignment(.leading).lineLimit(2)
-                }
+            PullRequestLink(pr: pr)
+        }
+    }
+}
+
+private struct PullRequestLink: View {
+    let pr: PullRequestInfo
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Button { NSWorkspace.shared.open(pr.url) } label: {
+                Text("#\(pr.number) \(pr.title)").multilineTextAlignment(.leading).lineLimit(2)
+            }
+            .buttonStyle(.link)
+            .help("Open on GitHub")
+            PullRequestStateChip(state: pr.state)
+        }
+    }
+}
+
+/// The folder as a link that reveals it in Finder, with a copy button.
+private struct PathLine: View {
+    let path: String
+    let display: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Button(display) { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
                 .buttonStyle(.link)
-                .help("Open on GitHub")
-                PullRequestStateChip(state: pr.state)
+                .fontDesign(.monospaced)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help("Reveal in Finder")
+            IconButton("doc.on.doc", help: "Copy path") { copyToPasteboard(path) }
+                .controlSize(.small)
+        }
+        .font(.callout)
+    }
+}
+
+private struct OpenInSection: View {
+    @Environment(AppModel.self) private var model
+    let path: String
+
+    var body: some View {
+        if !model.availableLaunchers.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionTitle("Open in")
+                LauncherGrid(path: path)
             }
         }
     }
@@ -372,38 +407,10 @@ private struct WorktreeSummary: View {
     var body: some View {
         let primary = repo.snapshot?.baseRef
         VStack(alignment: .leading, spacing: 10) {
-            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 6) {
-                GridRow {
-                    Text("Upstream").foregroundStyle(.secondary)
-                    if let upstream = worktree.upstream {
-                        HStack(spacing: 6) {
-                            Text(upstream)
-                            AheadBehindBadge(value: worktree.tracking)
-                        }
-                    } else {
-                        Text(worktree.branch == nil ? "detached" : "none").foregroundStyle(.tertiary)
-                    }
-                }
-                if let primary {
-                    GridRow {
-                        Text("vs primary").foregroundStyle(.secondary)
-                        HStack(spacing: 6) {
-                            Text(primary)
-                            AheadBehindBadge(value: worktree.versusPrimary)
-                        }
-                    }
-                }
-                if let pr = worktree.branch.flatMap({ repo.pullRequests[$0] }) {
-                    PullRequestGridRow(pr: pr)
-                }
-                GridRow {
-                    Text("Status").foregroundStyle(.secondary)
-                    WorkingTreeStatusText(status: worktree.status)
-                }
+            Card {
                 if let head = model.details[worktree.path]?.head {
-                    GridRow(alignment: .top) {
-                        Text("HEAD").foregroundStyle(.secondary)
-                        VStack(alignment: .leading, spacing: 1) {
+                    CardRow("HEAD") {
+                        VStack(alignment: .trailing, spacing: 1) {
                             Text(head.subject).lineLimit(2)
                             Text("\(head.sha.prefix(8)) · \(head.author) · \(head.date.relative)")
                                 .font(.caption)
@@ -411,47 +418,75 @@ private struct WorktreeSummary: View {
                         }
                     }
                 }
+                CardRow("Upstream") {
+                    if let upstream = worktree.upstream {
+                        HStack(spacing: 6) {
+                            Text(upstream).fontDesign(.monospaced)
+                            AheadBehindBadge(value: worktree.tracking)
+                        }
+                    } else {
+                        Text(worktree.branch == nil ? "detached" : "none").foregroundStyle(.tertiary)
+                    }
+                }
+                if let primary {
+                    CardRow("vs primary") {
+                        HStack(spacing: 6) {
+                            Text(primary).fontDesign(.monospaced)
+                            AheadBehindBadge(value: worktree.versusPrimary)
+                        }
+                    }
+                }
+                if let pr = worktree.branch.flatMap({ repo.pullRequests[$0] }) {
+                    CardRow("Pull request") { PullRequestLink(pr: pr) }
+                }
+                CardRow("Working tree") {
+                    WorkingTreeStatusText(status: worktree.status)
+                }
             }
             .font(.callout)
 
-            HStack(spacing: 8) {
-                if (worktree.tracking?.behind ?? 0) > 0 {
-                    Button { Task { await model.pull(repo, worktree: worktree) } } label: {
-                        Label("Pull", systemImage: "arrow.down.to.line")
-                    }
-                    .disabled(worktree.status.hasTrackedChanges || (worktree.tracking?.ahead ?? 0) > 0 || repo.activity != nil)
-                    .help("Fast-forward to \(worktree.upstream ?? "upstream")")
+            if (worktree.tracking?.behind ?? 0) > 0 {
+                Button { Task { await model.pull(repo, worktree: worktree) } } label: {
+                    Label("Pull", systemImage: "arrow.down.to.line")
                 }
-                Button { copyToPasteboard(worktree.path) } label: { Label("Copy Path", systemImage: "doc.on.doc") }
+                .controlSize(.small)
+                .disabled(worktree.status.hasTrackedChanges || (worktree.tracking?.ahead ?? 0) > 0 || repo.activity != nil)
+                .help("Fast-forward to \(worktree.upstream ?? "upstream")")
             }
-            .controlSize(.small)
-
-            LauncherGrid(path: worktree.path)
         }
     }
 }
 
-/// One button per launcher.
+/// One tile per launcher: its icon above its name.
 private struct LauncherGrid: View {
     @Environment(AppModel.self) private var model
     let path: String
 
     var body: some View {
-        let launchers = model.availableLaunchers
-        if !launchers.isEmpty {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 6)], alignment: .leading, spacing: 6) {
-                ForEach(launchers) { launcher in
-                    Button { model.open(path, with: launcher) } label: {
-                        HStack(spacing: 5) {
-                            LauncherIcon(launcher: launcher)
-                            Text(launcher.name).lineLimit(1)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 60), spacing: 6)], alignment: .leading, spacing: 6) {
+            ForEach(model.availableLaunchers) { launcher in
+                Button { model.open(path, with: launcher) } label: {
+                    VStack(spacing: 3) {
+                        LauncherIcon(launcher: launcher)
+                        Text(launcher.name).font(.caption2).lineLimit(1)
                     }
-                    .controlSize(.small)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 2)
                 }
+                .buttonStyle(TileButtonStyle())
+                .help("Open in \(launcher.name)")
             }
         }
+    }
+}
+
+private struct TileButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(.quaternary.opacity(configuration.isPressed ? 0.9 : 0.4), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(.separator))
+            .contentShape(RoundedRectangle(cornerRadius: 7))
     }
 }
 
@@ -463,9 +498,9 @@ private struct LauncherIcon: View {
            let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
             Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
                 .resizable()
-                .frame(width: 14, height: 14)
+                .frame(width: 20, height: 20)
         } else {
-            Image(systemName: "terminal")
+            Image(systemName: "terminal").frame(width: 20, height: 20)
         }
     }
 }
@@ -509,7 +544,11 @@ private struct WorktreeChanges: View {
     }
 
     var body: some View {
-        if let details {
+        if let details, hasWorkingTree, let primary,
+           details.uncommitted.isEmpty, details.changedSinceBase.isEmpty, details.commitsAhead.isEmpty {
+            // Nothing to list: one line instead of two empty sections.
+            EmptyNote("No changes: nothing uncommitted and no differences from \(primary)")
+        } else if let details {
             VStack(alignment: .leading, spacing: 14) {
                 Button { model.showDiffs(diffRequest) } label: {
                     Label("View Diffs", systemImage: "doc.text.magnifyingglass")
@@ -790,9 +829,11 @@ struct SectionTitle: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Text(title).font(.subheadline.weight(.semibold))
-            if let count { Text("\(count)").font(.caption).foregroundStyle(.secondary) }
+            Text(title).textCase(.uppercase).kerning(0.5)
+            if let count { Text("\(count)").monospacedDigit() }
         }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.secondary)
     }
 }
 

@@ -17,7 +17,7 @@ struct GitOutputView: View {
                 Picker("", selection: $kind) {
                     Text("All").tag(Kind.all)
                     Text("Actions").tag(Kind.actions)
-                    Text("Problems").tag(Kind.problems)
+                    Text("Problems \(model.gitLog.records.count(where: \.isProblem))").tag(Kind.problems)
                 }
                 .help("Actions hides the status and branch lookups Grove runs to refresh its view")
                 .pickerStyle(.segmented)
@@ -48,9 +48,17 @@ struct GitOutputView: View {
             .padding(.vertical, 6)
             Divider()
             HStack(spacing: 0) {
-                List(records, selection: $selection) { record in
-                    RunRow(record: record, repoName: repoName(for: record))
-                        .tag(record.id)
+                List(selection: $selection) {
+                    ForEach(batches(records)) { batch in
+                        Section {
+                            ForEach(batch.records) { record in
+                                RunRow(record: record, repoName: repoName(for: record))
+                                    .tag(record.id)
+                            }
+                        } header: {
+                            BatchHeader(batch: batch, repositories: Set(batch.records.compactMap(repoName(for:))).count)
+                        }
+                    }
                 }
                 .listStyle(.inset)
                 .frame(maxWidth: .infinity)
@@ -122,6 +130,20 @@ struct GitOutputView: View {
         return paths
     }
 
+    /// Consecutive commands started within the same second, which is how a refresh shows up.
+    private func batches(_ records: [GitRunRecord]) -> [RunBatch] {
+        var batches: [RunBatch] = []
+        for record in records {
+            let second = Int(record.started.timeIntervalSinceReferenceDate)
+            if let last = batches.last, last.second == second {
+                batches[batches.count - 1].records.append(record)
+            } else {
+                batches.append(RunBatch(id: record.id, second: second, records: [record]))
+            }
+        }
+        return batches
+    }
+
     private func repoName(for record: GitRunRecord) -> String? {
         guard let dir = record.directory else { return nil }
         if let repo = model.repos.first(where: { $0.path == dir || $0.snapshot?.worktrees.contains { $0.path == dir } == true }) {
@@ -131,28 +153,87 @@ struct GitOutputView: View {
     }
 }
 
+private struct RunBatch: Identifiable {
+    let id: GitRunRecord.ID
+    let second: Int
+    var records: [GitRunRecord]
+}
+
+/// "19:56:02 · 14 commands · 4 repositories · 52 ms · all succeeded"
+private struct BatchHeader: View {
+    let batch: RunBatch
+    let repositories: Int
+
+    var body: some View {
+        let records = batch.records
+        let problems = records.count(where: \.isProblem)
+        HStack(spacing: 6) {
+            if let first = records.first {
+                Text(first.started.formatted(date: .omitted, time: .standard))
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.primary)
+            }
+            Text(summary)
+            if problems > 0 {
+                Text("· \(problems) problem\(problems == 1 ? "" : "s")").foregroundStyle(.red)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    private var summary: String {
+        let records = batch.records
+        var parts = ["\(records.count) command\(records.count == 1 ? "" : "s")"]
+        if repositories > 1 { parts.append("\(repositories) repositories") }
+        if records.contains(where: \.isRunning) {
+            parts.append("running")
+        } else {
+            parts.append(formatDuration(records.compactMap(\.duration).reduce(0, +)))
+            if records.count > 1, records.allSatisfy(\.succeeded) { parts.append("all succeeded") }
+        }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// One line per command: status, repository, the command, how long it took.
 private struct RunRow: View {
     let record: GitRunRecord
     let repoName: String?
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(spacing: 10) {
             StatusIcon(record: record)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(record.commandLine)
-                    .font(.system(.callout, design: .monospaced))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                HStack(spacing: 6) {
-                    if let repoName { Text(repoName) }
-                    Text(record.started.formatted(date: .omitted, time: .standard))
-                    if let duration = record.duration { Text(formatDuration(duration)) }
-                }
+                .frame(width: 14)
+            Text(repoName ?? "")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(width: 100, alignment: .leading)
+            command
+                .font(.system(.callout, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(record.commandLine)
+            if let duration = record.duration {
+                Text(formatDuration(duration))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 1)
+    }
+
+    /// "git diff" stands out and the arguments recede; full commit hashes are cut to 7 characters.
+    private var command: Text {
+        let verb = record.arguments.first.flatMap { $0.hasPrefix("-") ? nil : $0 }
+        let head = ([record.tool] + (verb.map { [$0] } ?? [])).joined(separator: " ")
+        let rest = record.arguments.dropFirst(verb == nil ? 0 : 1)
+            .map { $0.replacing(/[0-9a-f]{40}/) { String($0.output.prefix(7)) } }
+            .joined(separator: " ")
+        return Text("\(Text(verbatim: head).fontWeight(.semibold)) \(Text(verbatim: rest).foregroundStyle(.secondary))")
     }
 }
 
@@ -163,7 +244,8 @@ private struct StatusIcon: View {
         if record.isRunning {
             ProgressView().controlSize(.mini)
         } else if record.succeeded {
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            // Success is the normal case, so it gets the quietest mark.
+            Circle().fill(.green).frame(width: 6, height: 6)
         } else if !record.isProblem {
             // An optional lookup that came back empty, or a cancelled run: nothing to act on.
             Image(systemName: "minus.circle.fill").foregroundStyle(.secondary)
@@ -179,34 +261,59 @@ private struct RunDetail: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline) {
-                    StatusIcon(record: record)
-                    Text(record.commandLine)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                    Spacer()
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        Text("$ ").foregroundStyle(.tertiary)
+                        Text(verbatim: record.commandLine).textSelection(.enabled)
+                    }
+                    .font(.system(.callout, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
                     Button { copyToPasteboard(report) } label: { Image(systemName: "doc.on.doc") }
-                        .buttonStyle(.borderless)
                         .help("Copy command and output")
                 }
-                Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 3) {
+                HStack(spacing: 8) {
+                    tile("Exit code", record.exitCode.map { "\($0)" } ?? (record.isRunning ? "running" : "none"),
+                         color: record.succeeded ? .green : record.isProblem ? .red : .primary)
+                    tile("Took", record.duration.map(formatDuration) ?? "…")
+                    tile("Started", record.started.formatted(date: .omitted, time: .standard))
+                }
+                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 4) {
                     if let dir = record.directory { row("Folder", dir.abbreviatingWithTilde) }
-                    row("Started", record.started.formatted(date: .abbreviated, time: .standard))
-                    if let duration = record.duration { row("Took", formatDuration(duration)) }
-                    if let code = record.exitCode { row("Exit code", "\(code)") }
+                    row("Date", record.started.formatted(date: .abbreviated, time: .omitted))
                     if let failure = record.failure { row("Problem", failure) }
                     if record.failureExpected && !record.succeeded && record.failure == nil {
                         row("Note", "Optional lookup: Grove carries on without it, e.g. a branch with no common history with the primary branch.")
                     }
                 }
                 .font(.callout)
-                stream("Error output (stderr)", record.stderr)
-                stream("Output (stdout)", record.stdout)
+                if record.stderr.isEmpty && record.stdout.isEmpty {
+                    Text(record.isRunning ? "No output yet" : "No output on stdout or stderr")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.separator, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+                } else {
+                    if !record.stderr.isEmpty { stream("Error output (stderr)", record.stderr) }
+                    if !record.stdout.isEmpty { stream("Output (stdout)", record.stdout) }
+                }
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private func tile(_ label: String, _ value: String, color: Color = .primary) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.system(.callout, design: .monospaced)).foregroundStyle(color).lineLimit(1)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
     }
 
     private func row(_ label: String, _ value: String) -> some View {
@@ -216,13 +323,11 @@ private struct RunDetail: View {
         }
     }
 
-    @ViewBuilder
     private func stream(_ title: String, _ text: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            Text(text.isEmpty ? "(empty)" : text)
+            Text(text)
                 .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(text.isEmpty ? .tertiary : .primary)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(8)
