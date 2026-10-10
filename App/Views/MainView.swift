@@ -162,7 +162,7 @@ private struct HeaderBar: View {
             .keyboardShortcut("r")
             .help("Reload local status, branches and worktrees (no network) — ⌘R")
             // The two network actions, set apart from the local refresh and the icon buttons.
-            ControlGroup {
+            HStack(spacing: 6) {
                 Button { Task { await model.fetchAll() } } label: {
                     Label("Fetch All", systemImage: "arrow.down.circle")
                 }
@@ -172,6 +172,7 @@ private struct HeaderBar: View {
                 }
                 .help("Fetch and fast-forward all clean checkouts")
             }
+            .buttonStyle(.bordered)
             .labelStyle(.titleAndIcon)
             .controlSize(.small)
             .fixedSize()

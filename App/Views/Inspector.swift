@@ -170,30 +170,21 @@ private struct WorktreeInspector: View {
     let worktree: WorktreeInfo
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let details = model.details[worktree.path]
+        let returnTo = Pane.worktree(repo: repo.path, path: worktree.path)
+        VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Image(systemName: "arrow.triangle.branch").foregroundStyle(.secondary)
                     Text(worktree.branch ?? "detached @ \(worktree.head.prefix(8))")
                         .font(.title3.weight(.semibold))
+                        .fontDesign(.monospaced)
                         .lineLimit(2)
                     Spacer()
                     if repo.activity != nil { ProgressView().controlSize(.small) }
                 }
                 Text("Worktree of \(repo.name)").font(.caption).foregroundStyle(.secondary)
                 PathLine(path: worktree.path, display: worktree.path.abbreviatingWithTilde)
-                // On its own line so the path gets the full width.
-                Button(role: .destructive) {
-                    Task { await model.confirmRemoveWorktree(repo, worktree: worktree) }
-                } label: {
-                    Label("Remove Worktree…", systemImage: "trash")
-                }
-                .buttonStyle(.borderless)
-                .font(.caption)
-                .disabled(worktree.isLocked || repo.activity != nil)
-                .help(worktree.isLocked
-                      ? "Locked: unlock it with git worktree unlock first"
-                      : "Delete this folder after confirming; the branch is kept")
                 if worktree.isLocked { Label("Locked", systemImage: "lock.fill").font(.caption) }
                 if worktree.isPrunable {
                     Label("Folder is missing (prunable)", systemImage: "exclamationmark.triangle")
@@ -201,12 +192,71 @@ private struct WorktreeInspector: View {
                         .foregroundStyle(.red)
                 }
             }
+
+            HStack(spacing: 8) {
+                ViewDiffsButton(request: DiffRequest(repo: repo.path, target: .worktree(worktree.path), returnTo: returnTo),
+                                details: details)
+                Button { model.showGitOutput(for: repo) } label: {
+                    Label("Git Output", systemImage: "text.alignleft").frame(maxWidth: .infinity)
+                }
+                .help("The git commands run for this repository and what they printed")
+                // The destructive action is one step away from the everyday ones.
+                MoreMenu {
+                    Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([worktree.url]) }
+                    Divider()
+                    Button(role: .destructive) {
+                        Task { await model.confirmRemoveWorktree(repo, worktree: worktree) }
+                    } label: {
+                        Label(worktree.isLocked ? "Remove Worktree… (locked)" : "Remove Worktree…", systemImage: "trash")
+                    }
+                    .disabled(worktree.isLocked || repo.activity != nil)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+
             RepoBanners(repo: repo)
             OpenInSection(path: worktree.path)
             WorktreeSummary(repo: repo, worktree: worktree)
-            WorktreeChanges(repo: repo, worktree: worktree, details: model.details[worktree.path], primary: repo.snapshot?.baseRef,
-                            returnTo: .worktree(repo: repo.path, path: worktree.path))
+            WorktreeChanges(repo: repo, worktree: worktree, details: details, primary: repo.snapshot?.baseRef,
+                            returnTo: returnTo, showsDiffButton: false)
         }
+    }
+}
+
+/// "View Diffs", for the row of actions under a page's title.
+private struct ViewDiffsButton: View {
+    @Environment(AppModel.self) private var model
+    let request: DiffRequest
+    let details: WorktreeDetails?
+
+    var body: some View {
+        Button { model.showDiffs(request) } label: {
+            Label("View Diffs", systemImage: "doc.text.magnifyingglass").frame(maxWidth: .infinity)
+        }
+        .disabled(details.map { $0.uncommitted.isEmpty && $0.changedSinceBase.isEmpty } ?? true)
+        .help("Browse the changed files and their diffs")
+    }
+}
+
+/// The "…" button at the end of a row of actions.
+private struct MoreMenu<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        // A menu's own button is shorter than a bordered button, so the label draws the button
+        // itself and stretches to the height of the row it sits in.
+        Menu { content } label: {
+            Image(systemName: "ellipsis")
+                .frame(width: 30)
+                .frame(maxHeight: .infinity)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                .contentShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize(horizontal: true, vertical: false)
+            .help("More actions")
     }
 }
 
@@ -233,81 +283,34 @@ private struct BranchInspector: View {
     var body: some View {
         let primary = repo.snapshot?.baseRef
         let details = model.branchDetails[AppModel.branchKey(repo.path, branch.name)]
-        VStack(alignment: .leading, spacing: 12) {
+        let returnTo = Pane.branch(repo: repo.path, name: branch.name)
+        VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Image(systemName: "arrow.triangle.branch").foregroundStyle(.secondary)
                     Text(branch.name)
                         .font(.title3.weight(.semibold))
+                        .fontDesign(.monospaced)
                         .lineLimit(2)
                         .textSelection(.enabled)
+                    IconButton("doc.on.doc", help: "Copy branch name") { copyToPasteboard(branch.name) }
+                        .controlSize(.small)
                     Spacer()
                     if repo.activity != nil { ProgressView().controlSize(.small) }
                 }
-                Text("Branch of \(repo.name) — not checked out in a worktree")
+                Text("Branch of \(repo.name), not checked out in a worktree")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                // Same spot as "Remove Worktree…" on a worktree's page. The only way Grove creates
-                // a worktree: on this click, in a folder the user names.
-                Button(action: createWorktree) {
-                    Label("Create Worktree…", systemImage: "plus.rectangle.on.folder")
-                }
-                .buttonStyle(.borderless)
-                .font(.caption)
-                .disabled(repo.activity != nil)
-                .help("Check out \(branch.name) in a new worktree; you choose the folder")
-                Button(role: .destructive) {
-                    Task { await model.confirmDeleteBranch(repo, branch: branch) }
-                } label: {
-                    Label("Delete Branch…", systemImage: "trash")
-                }
-                .buttonStyle(.borderless)
-                .font(.caption)
-                .disabled(repo.activity != nil)
-                .help("Delete this local branch after confirming; the remote branch is kept")
             }
-            RepoBanners(repo: repo)
-
-            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 6) {
-                GridRow {
-                    Text("Upstream").foregroundStyle(.secondary)
-                    if branch.upstreamGone {
-                        Text("\(branch.upstream ?? "upstream") (gone)").foregroundStyle(.red)
-                    } else if let upstream = branch.upstream {
-                        HStack(spacing: 6) {
-                            Text(upstream)
-                            AheadBehindBadge(value: branch.tracking)
-                        }
-                    } else {
-                        Text("none").foregroundStyle(.tertiary)
-                    }
-                }
-                if let primary {
-                    GridRow {
-                        Text("vs primary").foregroundStyle(.secondary)
-                        HStack(spacing: 6) {
-                            Text(primary)
-                            AheadBehindBadge(value: branch.versusPrimary)
-                        }
-                    }
-                }
-                if let pr = repo.pullRequests[branch.name] {
-                    PullRequestGridRow(pr: pr)
-                }
-                GridRow(alignment: .top) {
-                    Text("Last commit").foregroundStyle(.secondary)
-                    let head = details?.head ?? branch.commit
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(head.subject).lineLimit(2)
-                        Text("\(head.sha.prefix(8)) · \(head.author) · \(head.date.relative)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .font(.callout)
 
             HStack(spacing: 8) {
+                // The only way Grove creates a worktree: on this click, in a folder the user names.
+                Button(action: createWorktree) {
+                    Label("Create Worktree…", systemImage: "plus.rectangle.on.folder").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(repo.activity != nil)
+                .help("Check out \(branch.name) in a new worktree; you choose the folder")
                 if let tracking = branch.tracking, tracking.behind > 0 {
                     Button { Task { await model.fastForward(repo, branch: branch) } } label: {
                         Label("Fast-Forward", systemImage: "arrow.down.to.line")
@@ -317,13 +320,61 @@ private struct BranchInspector: View {
                           ? "Diverged from \(branch.upstream ?? "upstream"): \(tracking.ahead) local commits"
                           : "Move \(branch.name) to \(branch.upstream ?? "upstream")")
                 }
-                Button { copyToPasteboard(branch.name) } label: { Label("Copy Name", systemImage: "doc.on.doc") }
+                ViewDiffsButton(request: DiffRequest(repo: repo.path, target: .branch(branch.name), returnTo: returnTo),
+                                details: details)
+                MoreMenu {
+                    Button("Copy Branch Name") { copyToPasteboard(branch.name) }
+                    Divider()
+                    Button(role: .destructive) {
+                        Task { await model.confirmDeleteBranch(repo, branch: branch) }
+                    } label: {
+                        Label("Delete Branch…", systemImage: "trash")
+                    }
+                    .disabled(repo.activity != nil)
+                }
             }
-            .controlSize(.small)
+            .fixedSize(horizontal: false, vertical: true)
+
+            RepoBanners(repo: repo)
+
+            Card {
+                CardRow("Last commit") {
+                    let head = details?.head ?? branch.commit
+                    VStack(alignment: .trailing, spacing: 1) {
+                        Text(head.subject).lineLimit(2)
+                        Text("\(head.sha.prefix(8)) · \(head.author) · \(head.date.relative)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                CardRow("Upstream") {
+                    if branch.upstreamGone {
+                        Text("\(branch.upstream ?? "upstream") (gone)").foregroundStyle(.red)
+                    } else if let upstream = branch.upstream {
+                        HStack(spacing: 6) {
+                            Text(upstream).fontDesign(.monospaced).lineLimit(1).truncationMode(.middle).help(upstream)
+                            AheadBehindBadge(value: branch.tracking).layoutPriority(1)
+                        }
+                    } else {
+                        Text("none").foregroundStyle(.tertiary)
+                    }
+                }
+                if let primary {
+                    CardRow("vs primary") {
+                        HStack(spacing: 6) {
+                            Text(primary).fontDesign(.monospaced)
+                            AheadBehindBadge(value: branch.versusPrimary)
+                        }
+                    }
+                }
+                if let pr = repo.pullRequests[branch.name] {
+                    CardRow("Pull request") { PullRequestLink(pr: pr) }
+                }
+            }
+            .font(.callout)
 
             WorktreeChanges(repo: repo, root: repo.path, details: details, primary: primary, aheadCount: branch.versusPrimary?.ahead,
-                            returnTo: .branch(repo: repo.path, name: branch.name),
-                            branch: BranchRef(repo: repo, name: branch.name))
+                            returnTo: returnTo, branch: BranchRef(repo: repo, name: branch.name), showsDiffButton: false)
         }
     }
 
@@ -337,18 +388,7 @@ private struct BranchInspector: View {
     }
 }
 
-/// "Pull request  #123 Title [Open]", linking to the pull request on GitHub.
-private struct PullRequestGridRow: View {
-    let pr: PullRequestInfo
-
-    var body: some View {
-        GridRow(alignment: .top) {
-            Text("Pull request").foregroundStyle(.secondary)
-            PullRequestLink(pr: pr)
-        }
-    }
-}
-
+/// "#123 Title [Open]", linking to the pull request on GitHub.
 private struct PullRequestLink: View {
     let pr: PullRequestInfo
 
@@ -371,12 +411,12 @@ private struct PathLine: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Button(display) { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
-                .buttonStyle(.link)
-                .fontDesign(.monospaced)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .help("Reveal in Finder")
+            Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) } label: {
+                // One line: a long worktree path is cut in the middle rather than wrapped.
+                Text(display).fontDesign(.monospaced).lineLimit(1).truncationMode(.middle)
+            }
+            .buttonStyle(.link)
+            .help("Reveal \(display) in Finder")
             IconButton("doc.on.doc", help: "Copy path") { copyToPasteboard(path) }
                 .controlSize(.small)
         }
@@ -521,15 +561,19 @@ private struct WorktreeChanges: View {
     let returnTo: Pane
     /// Set when showing a branch that has no worktree.
     let branch: BranchRef?
+    /// False where the page already has "View Diffs" among its actions.
+    let showsDiffButton: Bool
     private var hasWorkingTree: Bool { branch == nil }
 
-    init(repo: RepoState, worktree: WorktreeInfo, details: WorktreeDetails?, primary: String?, returnTo: Pane) {
+    init(repo: RepoState, worktree: WorktreeInfo, details: WorktreeDetails?, primary: String?, returnTo: Pane,
+         showsDiffButton: Bool = true) {
         self.init(repo: repo, root: worktree.path, details: details, primary: primary,
-                  aheadCount: worktree.versusPrimary?.ahead, returnTo: returnTo)
+                  aheadCount: worktree.versusPrimary?.ahead, returnTo: returnTo, showsDiffButton: showsDiffButton)
     }
 
     init(repo: RepoState, root: String, details: WorktreeDetails?, primary: String?, aheadCount: Int?,
-         returnTo: Pane, branch: BranchRef? = nil) {
+         returnTo: Pane, branch: BranchRef? = nil, showsDiffButton: Bool = true) {
+        self.showsDiffButton = showsDiffButton
         self.repo = repo
         self.returnTo = returnTo
         self.root = root
@@ -550,12 +594,14 @@ private struct WorktreeChanges: View {
             EmptyNote("No changes: nothing uncommitted and no differences from \(primary)")
         } else if let details {
             VStack(alignment: .leading, spacing: 14) {
-                Button { model.showDiffs(diffRequest) } label: {
-                    Label("View Diffs", systemImage: "doc.text.magnifyingglass")
+                if showsDiffButton {
+                    Button { model.showDiffs(diffRequest) } label: {
+                        Label("View Diffs", systemImage: "doc.text.magnifyingglass")
+                    }
+                    .controlSize(.small)
+                    .disabled(details.uncommitted.isEmpty && details.changedSinceBase.isEmpty)
+                    .help("Browse the changed files and their diffs")
                 }
-                .controlSize(.small)
-                .disabled(details.uncommitted.isEmpty && details.changedSinceBase.isEmpty)
-                .help("Browse the changed files and their diffs")
                 if hasWorkingTree {
                     VStack(alignment: .leading, spacing: 4) {
                         FileListHeader(title: "Uncommitted", files: details.uncommitted)
@@ -634,7 +680,8 @@ private struct FileListHeader: View {
             let ins = files.compactMap(\.insertions).reduce(0, +)
             let del = files.compactMap(\.deletions).reduce(0, +)
             if ins + del > 0 {
-                HStack(spacing: 0) {
+                // Same spacing as the two number columns of a file row, so the totals sit above them.
+                HStack(spacing: 6) {
                     Text("+\(ins)").foregroundStyle(.green).frame(width: FileTable.numberWidth, alignment: .trailing)
                     Text("−\(del)").foregroundStyle(.red).frame(width: FileTable.numberWidth, alignment: .trailing)
                 }
