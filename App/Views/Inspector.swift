@@ -102,10 +102,6 @@ private struct RepoInspector: View {
                     Text("Fetched").foregroundStyle(.secondary)
                     Text(repo.lastFetch?.relative ?? "never")
                 }
-                GridRow {
-                    Text("Auto-fetch").foregroundStyle(.secondary)
-                    FetchIntervalPicker(repo: repo)
-                }
             }
             .font(.callout)
 
@@ -119,6 +115,9 @@ private struct RepoInspector: View {
             .controlSize(.small)
             .disabled(repo.activity != nil)
 
+            Divider()
+            RepoSettingsSection(repo: repo)
+
             if let main = repo.mainWorktree {
                 Divider()
                 SectionTitle("Main Checkout")
@@ -130,6 +129,7 @@ private struct RepoInspector: View {
             if let snapshot = repo.snapshot {
                 branchSections(snapshot)
             }
+
         }
     }
 
@@ -763,6 +763,12 @@ private struct RepoBanners: View {
                    details: { model.showGitOutput(for: repo) })
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         }
+        if repo.showsStorageWarning, let storage = repo.storage {
+            Banner(text: "\(AppModel.describe(storage)). Cleaning up can free space and speed up git.",
+                   style: .info, action: ("Clean Up…", { Task { await model.confirmCleanUp(repo) } }),
+                   actionDisabled: repo.activity != nil, onDismiss: { repo.storageWarningDismissed = true })
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
     }
 
     /// Fetch rejected because tags moved on the remote: offer to overwrite the local copies.
@@ -773,7 +779,7 @@ private struct RepoBanners: View {
     }
 }
 
-private struct SectionTitle: View {
+struct SectionTitle: View {
     let title: String
     var count: Int?
 
@@ -790,7 +796,7 @@ private struct SectionTitle: View {
     }
 }
 
-private struct FetchIntervalPicker: View {
+struct FetchIntervalPicker: View {
     @Environment(AppModel.self) private var model
     let repo: RepoState
 
@@ -803,7 +809,9 @@ private struct FetchIntervalPicker: View {
             set: { model.setFetchInterval($0 < 0 ? nil : $0, for: repo) }
         )
         Picker("Auto-fetch", selection: binding) {
-            Text("Default (\(Self.describe(model.config.defaultFetchIntervalMinutes)))").tag(-1)
+            let profile = model.settings(for: repo).profile
+            let fallback = EffectiveRepoSettings.defaults(profile, defaultFetchIntervalMinutes: model.config.defaultFetchIntervalMinutes)
+            Text("Default (\(Self.describe(fallback.fetchIntervalMinutes)))").tag(-1)
             Divider()
             ForEach(Self.options, id: \.self) { Text(Self.describe($0)).tag($0) }
         }
@@ -814,7 +822,7 @@ private struct FetchIntervalPicker: View {
 
     static func describe(_ minutes: Int) -> String {
         switch minutes {
-        case 0: "off"
+        case 0: "off (on demand)"
         case ..<60: "every \(minutes) min"
         default: "every \(minutes / 60) h"
         }

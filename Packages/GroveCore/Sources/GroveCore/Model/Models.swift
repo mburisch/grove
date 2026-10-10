@@ -210,6 +210,8 @@ public struct RepoSnapshot: Sendable, Hashable {
     /// The ref branches are compared against: `origin/<primary>`, or the local primary branch
     /// when the repository has no remote copy of it. nil when there is nothing to compare to.
     public var baseRef: String?
+    /// The commit `baseRef` points at.
+    public var baseSHA: String?
     public var mode: CheckoutMode
     public var partialCloneFilter: String?
     public var worktrees: [WorktreeInfo]

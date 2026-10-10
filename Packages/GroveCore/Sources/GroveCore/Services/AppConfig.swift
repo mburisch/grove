@@ -12,16 +12,95 @@ public struct ScanRoot: Codable, Sendable, Hashable, Identifiable {
     public var id: String { path }
 }
 
-/// Per-repository settings, keyed by path in `AppConfig.repoSettings`.
+/// How much work Grove does to keep a repository current. Large repositories get cheaper defaults.
+public enum RepoProfile: String, Codable, Sendable, CaseIterable {
+    case normal, large
+
+    /// Repositories whose object storage is at least this big are treated as large.
+    public static let largeStorageBytes: Int64 = 2 << 30
+
+    public static func detect(storageBytes: Int64) -> RepoProfile {
+        storageBytes >= largeStorageBytes ? .large : .normal
+    }
+
+    public var label: String {
+        switch self {
+        case .normal: "Normal"
+        case .large: "Large"
+        }
+    }
+}
+
+/// Which branches a fetch downloads.
+public enum FetchScope: String, Codable, Sendable, CaseIterable {
+    /// Every branch on the remote, pruning deleted ones.
+    case all
+    /// The primary branch and the upstreams of local branches.
+    case primaryAndLocal
+}
+
+/// Per-repository settings, keyed by path in `AppConfig.repoSettings`. A nil field follows the profile.
 public struct RepoSettings: Codable, Sendable, Hashable {
-    /// Minutes between automatic fetches; nil uses the global default, 0 disables.
+    /// Minutes between automatic fetches; nil uses the profile's default, 0 disables.
     public var fetchIntervalMinutes: Int?
     /// Depth used when trimming a shallow checkout.
     public var shallowDepth: Int?
+    /// nil = chosen from the repository's size.
+    public var profile: RepoProfile?
+    public var fetchScope: FetchScope?
+    public var fetchTags: Bool?
+    /// Compare every recent branch with the primary branch, not just those checked out in a worktree.
+    public var compareAllBranches: Bool?
+    /// Count changed lines (`git diff --shortstat`) for worktrees and branches.
+    public var lineCounts: Bool?
 
     public init(fetchIntervalMinutes: Int? = nil, shallowDepth: Int? = nil) {
         self.fetchIntervalMinutes = fetchIntervalMinutes
         self.shallowDepth = shallowDepth
+    }
+
+    /// True when any setting differs from the profile's defaults.
+    public var hasOverrides: Bool {
+        fetchIntervalMinutes != nil || fetchScope != nil || fetchTags != nil || compareAllBranches != nil || lineCounts != nil
+    }
+
+    /// Follows `profile` (nil = by size) with no individual overrides.
+    public mutating func applyDefaults(_ profile: RepoProfile?) {
+        self.profile = profile
+        fetchIntervalMinutes = nil
+        fetchScope = nil
+        fetchTags = nil
+        compareAllBranches = nil
+        lineCounts = nil
+    }
+}
+
+/// A repository's settings with every default filled in.
+public struct EffectiveRepoSettings: Sendable, Hashable {
+    public var profile: RepoProfile
+    public var fetchIntervalMinutes: Int
+    public var fetchScope: FetchScope
+    public var fetchTags: Bool
+    public var compareAllBranches: Bool
+    public var lineCounts: Bool
+
+    /// The defaults for `profile`. Large repositories fetch at most hourly, and only when
+    /// automatic fetching is on at all.
+    public static func defaults(_ profile: RepoProfile, defaultFetchIntervalMinutes: Int) -> EffectiveRepoSettings {
+        switch profile {
+        case .normal:
+            EffectiveRepoSettings(profile: profile, fetchIntervalMinutes: defaultFetchIntervalMinutes, fetchScope: .all,
+                                  fetchTags: true, compareAllBranches: true, lineCounts: true)
+        case .large:
+            EffectiveRepoSettings(profile: profile,
+                                  fetchIntervalMinutes: defaultFetchIntervalMinutes > 0 ? max(defaultFetchIntervalMinutes, 60) : 0,
+                                  fetchScope: .primaryAndLocal, fetchTags: false, compareAllBranches: false, lineCounts: false)
+        }
+    }
+
+    public var fetchOptions: GitRepository.FetchOptions { .init(scope: fetchScope, tags: fetchTags) }
+    public var snapshotOptions: GitRepository.SnapshotOptions {
+        .init(compareAllBranches: compareAllBranches, lineCounts: lineCounts)
     }
 }
 
@@ -113,8 +192,16 @@ public struct AppConfig: Codable, Sendable, Hashable {
         repoSettings[path] ?? RepoSettings()
     }
 
-    public func fetchInterval(for path: String) -> Int {
-        settings(for: path).fetchIntervalMinutes ?? defaultFetchIntervalMinutes
+    /// `path`'s settings, with defaults from its profile; `detected` is the profile its size suggests.
+    public func effectiveSettings(for path: String, detected: RepoProfile) -> EffectiveRepoSettings {
+        let custom = settings(for: path)
+        var result = EffectiveRepoSettings.defaults(custom.profile ?? detected, defaultFetchIntervalMinutes: defaultFetchIntervalMinutes)
+        if let v = custom.fetchIntervalMinutes { result.fetchIntervalMinutes = v }
+        if let v = custom.fetchScope { result.fetchScope = v }
+        if let v = custom.fetchTags { result.fetchTags = v }
+        if let v = custom.compareAllBranches { result.compareAllBranches = v }
+        if let v = custom.lineCounts { result.lineCounts = v }
+        return result
     }
 }
 

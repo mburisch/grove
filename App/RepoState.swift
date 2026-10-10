@@ -36,6 +36,22 @@ final class RepoState: Identifiable {
     /// Whether pull requests were looked up at least once (first load happens without a fetch).
     var pullRequestsLoaded = false
 
+    /// Object storage size, read before the first snapshot and after fetches and clean-ups.
+    var storage: RepoStorage?
+    var prefetch: PrefetchStatus?
+    /// The user dismissed the clean-up suggestion (until the app restarts or the repo is cleaned up).
+    var storageWarningDismissed = false
+
+    /// Many packs or loose objects: suggest a clean-up on the repo page and in the list.
+    var showsStorageWarning: Bool { storage?.needsCleanUp == true && !storageWarningDismissed }
+    /// Comparisons with the primary branch by commit, reused while neither side moves.
+    @ObservationIgnored let comparisons = ComparisonCache()
+
+    /// The profile the repository's size suggests.
+    var detectedProfile: RepoProfile {
+        storage.map { RepoProfile.detect(storageBytes: $0.totalBytes) } ?? .normal
+    }
+
     @ObservationIgnored private var tail: Task<Void, Never>?
 
     init(path: String) {

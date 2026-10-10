@@ -17,9 +17,26 @@ public struct GitRepository: Sendable {
 
     // MARK: - Snapshot
 
-    /// Reads remote, mode, worktrees and branches. `maxComparisons` caps how many
-    /// branches get an ahead/behind count against the primary branch.
-    public func snapshot(maxComparisons: Int = 40) async throws -> RepoSnapshot {
+    /// What a snapshot computes beyond refs and working-tree status.
+    public struct SnapshotOptions: Sendable, Hashable {
+        /// Compare recent branches (up to `maxComparisons`) with the primary branch. When false, only
+        /// branches checked out in a worktree are compared; others keep results already in the cache.
+        public var compareAllBranches = true
+        /// Count changed lines with `git diff --shortstat`.
+        public var lineCounts = true
+        public var maxComparisons = 40
+
+        public init(compareAllBranches: Bool = true, lineCounts: Bool = true, maxComparisons: Int = 40) {
+            self.compareAllBranches = compareAllBranches
+            self.lineCounts = lineCounts
+            self.maxComparisons = maxComparisons
+        }
+    }
+
+    /// Reads remote, mode, worktrees and branches. Comparisons with the primary branch come from
+    /// `cache` when neither commit changed since an earlier snapshot.
+    public func snapshot(options: SnapshotOptions = SnapshotOptions(), cache: ComparisonCache? = nil) async throws -> RepoSnapshot {
+        let cache = cache ?? ComparisonCache()
         let remoteName = try await primaryRemoteName()
         let remoteURL: String? = if let remoteName {
             await git.outputIfSuccess(["remote", "get-url", remoteName], in: url)
@@ -37,6 +54,10 @@ public struct GitRepository: Sendable {
         // Compare against the remote primary branch, or the local one when there is no remote copy.
         let hasLocalPrimary = primary.map { p in refs.contains { $0.refname == "refs/heads/\(p)" } } ?? false
         let compareTarget = hasPrimaryRef ? primaryRef : (hasLocalPrimary ? primary : nil)
+        let compareRef = hasPrimaryRef ? primaryRef.map { "refs/remotes/\($0)" } : primary.map { "refs/heads/\($0)" }
+        let target: CompareTarget? = compareTarget.flatMap { name in
+            refs.first { $0.refname == compareRef }.map { CompareTarget(ref: name, sha: $0.commit.sha) }
+        }
 
         // Worktrees, each with status and diff stats.
         let worktreeRecords = GitParsers.parseWorktrees(
@@ -45,7 +66,8 @@ public struct GitRepository: Sendable {
         let worktrees = try await withThrowingTaskGroup(of: (Int, WorktreeInfo).self) { group in
             for (index, record) in worktreeRecords.enumerated() {
                 group.addTask {
-                    (index, await worktreeInfo(record, isMain: index == 0, compareTo: compareTarget))
+                    (index, await worktreeInfo(record, isMain: index == 0, compareTo: target,
+                                               lineCounts: options.lineCounts, cache: cache))
                 }
             }
             var results: [(Int, WorktreeInfo)] = []
@@ -78,34 +100,51 @@ public struct GitRepository: Sendable {
         }
 
         // Ahead/behind vs primary, most relevant branches first, capped.
-        if let compareTarget {
+        if let target {
             branches.sort { lhs, rhs in
                 if (lhs.worktreePath != nil) != (rhs.worktreePath != nil) { return lhs.worktreePath != nil }
                 return lhs.commit.date > rhs.commit.date
             }
             remoteBranches.sort { $0.commit.date > $1.commit.date }
-            let localTargets = branches.prefix(maxComparisons).map { "refs/heads/\($0.name)" }
-            let remoteTargets = remoteBranches.prefix(max(0, maxComparisons - localTargets.count))
-                .map { "\(remotePrefix)\($0.name)" }
-            // Branches without a worktree also get a diff stat, like worktrees have.
-            let diffTargets = Set(branches.prefix(maxComparisons).filter { $0.worktreePath == nil }
-                .map { "refs/heads/\($0.name)" })
-            let (counts, diffs) = await compare(localTargets + remoteTargets, to: compareTarget, diffing: diffTargets)
-            for i in branches.indices {
-                let ref = "refs/heads/\(branches[i].name)"
-                branches[i].versusPrimary = counts[ref]
-                branches[i].committedDiff = diffs[ref]
+            let limit = options.compareAllBranches ? options.maxComparisons : 0
+            let localTargets = Set(branches.prefix(limit).map(\.name))
+                .union(branches.filter { $0.worktreePath != nil }.map(\.name))
+            let remoteTargets = Set(remoteBranches.prefix(max(0, limit - localTargets.count)).map(\.name))
+            await withTaskGroup(of: Void.self) { group in
+                // Bounded fan-out so a repo with many branches doesn't spawn dozens of processes at once.
+                var jobs: [@Sendable () async -> Void] = []
+                for i in branches.indices {
+                    let branch = branches[i]
+                    // Branches without a worktree also get a diff stat, like worktrees have.
+                    let diff = options.lineCounts && branch.worktreePath == nil
+                    guard localTargets.contains(branch.name) else { continue }
+                    jobs.append { _ = await comparison(of: branch.commit.sha, to: target, diff: diff, cache: cache) }
+                }
+                for branch in remoteBranches where remoteTargets.contains(branch.name) {
+                    jobs.append { _ = await comparison(of: branch.commit.sha, to: target, diff: false, cache: cache) }
+                }
+                var iterator = jobs.makeIterator()
+                for _ in 0..<8 { if let job = iterator.next() { group.addTask(operation: job) } }
+                for await _ in group { if let job = iterator.next() { group.addTask(operation: job) } }
             }
-            for i in remoteBranches.indices {
-                remoteBranches[i].versusPrimary = counts["\(remotePrefix)\(remoteBranches[i].name)"]
+            // Fill in from the cache, which also holds comparisons made on demand (`comparison`).
+            for i in branches.indices {
+                let entry = await cache.entry(branches[i].commit.sha, target)
+                branches[i].versusPrimary = entry?.count
+                branches[i].committedDiff = branches[i].worktreePath == nil && options.lineCounts ? entry?.diff : nil
+            }
+            for i in remoteBranches.indices where remoteTargets.contains(remoteBranches[i].name) {
+                remoteBranches[i].versusPrimary = await cache.entry(remoteBranches[i].commit.sha, target)?.count
             }
         }
+        await cache.endPass()
 
         return RepoSnapshot(
             remoteName: remoteName,
             remoteURL: remoteURL,
             primaryBranch: primary,
             baseRef: compareTarget,
+            baseSHA: target?.sha,
             mode: mode.mode,
             partialCloneFilter: mode.filter,
             worktrees: worktrees,
@@ -150,7 +189,8 @@ public struct GitRepository: Sendable {
         return (.full, nil)
     }
 
-    private func worktreeInfo(_ record: GitParsers.WorktreeRecord, isMain: Bool, compareTo target: String?) async -> WorktreeInfo {
+    private func worktreeInfo(_ record: GitParsers.WorktreeRecord, isMain: Bool, compareTo target: CompareTarget?,
+                              lineCounts: Bool, cache: ComparisonCache?) async -> WorktreeInfo {
         let wtURL = URL(fileURLWithPath: record.path)
         var info = WorktreeInfo(
             path: record.path,
@@ -169,12 +209,9 @@ public struct GitRepository: Sendable {
         guard !record.isPrunable, FileManager.default.fileExists(atPath: record.path) else { return info }
 
         async let statusOutput = git.outputIfSuccess(["status", "--porcelain=v2", "--branch"], in: wtURL)
-        async let uncommitted = git.outputIfSuccess(["diff", "--shortstat", "HEAD"], in: wtURL)
-        async let versus: String? = if let target {
-            git.outputIfSuccess(["rev-list", "--left-right", "--count", "HEAD...\(target)"], in: wtURL)
-        } else { nil }
-        async let committed: String? = if let target {
-            git.outputIfSuccess(["diff", "--shortstat", "\(target)...HEAD"], in: wtURL)
+        async let uncommitted: String? = lineCounts ? git.outputIfSuccess(["diff", "--shortstat", "HEAD"], in: wtURL) : nil
+        async let versus: (count: AheadBehind?, diff: DiffStat?)? = if let target, !record.head.isEmpty {
+            comparison(of: record.head, to: target, diff: lineCounts, cache: cache)
         } else { nil }
 
         if let statusOutput = await statusOutput {
@@ -184,36 +221,27 @@ public struct GitRepository: Sendable {
             info.tracking = status.aheadBehind
         }
         info.uncommittedDiff = GitParsers.parseShortStat(await uncommitted ?? "")
-        info.versusPrimary = await versus.flatMap(GitParsers.parseLeftRight)
-        info.committedDiff = GitParsers.parseShortStat(await committed ?? "")
+        let comparison = await versus
+        info.versusPrimary = comparison?.count
+        info.committedDiff = comparison?.diff ?? .zero
         return info
     }
 
-    /// Ahead/behind of each ref vs `target`, plus a diff stat since the fork point for the refs in `diffing`.
-    private func compare(_ refs: [String], to target: String, diffing: Set<String> = []) async
-        -> (counts: [String: AheadBehind], diffs: [String: DiffStat]) {
-        await withTaskGroup(of: (String, AheadBehind?, DiffStat?).self) { group in
-            // Bounded fan-out so a repo with many branches doesn't spawn dozens of processes at once.
-            var iterator = refs.makeIterator()
-            func addNext() {
-                guard let ref = iterator.next() else { return }
-                group.addTask {
-                    async let out = git.outputIfSuccess(["rev-list", "--left-right", "--count", "\(ref)...\(target)"], in: url)
-                    async let diff: String? = diffing.contains(ref)
-                        ? git.outputIfSuccess(["diff", "--shortstat", "\(target)...\(ref)"], in: url) : nil
-                    return (ref, await out.flatMap(GitParsers.parseLeftRight), await diff.map(GitParsers.parseShortStat))
-                }
-            }
-            for _ in 0..<8 { addNext() }
-            var counts: [String: AheadBehind] = [:]
-            var diffs: [String: DiffStat] = [:]
-            for await (ref, count, diff) in group {
-                if let count { counts[ref] = count }
-                if let diff { diffs[ref] = diff }
-                addNext()
-            }
-            return (counts, diffs)
-        }
+    /// Ahead/behind of commit `sha` vs `target` and, with `diff`, its diff stat since the fork point.
+    /// Reuses an earlier result for the same pair of commits from `cache`.
+    public func comparison(of sha: String, to target: CompareTarget, diff: Bool,
+                           cache: ComparisonCache?) async -> (count: AheadBehind?, diff: DiffStat?) {
+        let cached = await cache?.entry(sha, target)
+        async let countOutput: String? = cached?.count == nil
+            ? git.outputIfSuccess(["rev-list", "--left-right", "--count", "\(sha)...\(target.sha)"], in: url) : nil
+        async let diffOutput: String? = diff && cached?.diff == nil
+            ? git.outputIfSuccess(["diff", "--shortstat", "\(target.sha)...\(sha)"], in: url) : nil
+        let countText = await countOutput
+        let diffText = await diffOutput
+        let count = cached?.count ?? countText.flatMap(GitParsers.parseLeftRight)
+        let stat = diff ? cached?.diff ?? diffText.map(GitParsers.parseShortStat) : nil
+        await cache?.store(sha, target, count: count, diff: stat)
+        return (count, stat)
     }
 
     /// Changed files and commits for one worktree. `primaryRef` is e.g. `origin/main`.
@@ -343,17 +371,62 @@ public struct GitRepository: Sendable {
 
     // MARK: - Fetch & fast-forward
 
+    public struct FetchOptions: Sendable, Hashable {
+        public var scope: FetchScope
+        /// Download tags pointing into fetched history (git's default). False passes `--no-tags`.
+        public var tags: Bool
+
+        public init(scope: FetchScope = .all, tags: Bool = true) {
+            self.scope = scope
+            self.tags = tags
+        }
+    }
+
     /// Fetches the primary remote. Shallow and blobless checkouts keep their mode: a blob filter is
     /// stored in the remote config and reapplied by git, and a fetch into a shallow repo only adds
     /// the commits since the existing shallow boundary (use `convert(to: .shallow)` to trim again).
-    public func fetch(remote: String? = nil) async throws {
+    public func fetch(remote: String? = nil, options: FetchOptions = FetchOptions()) async throws {
         var remote = remote
         if remote == nil { remote = try await primaryRemoteName() }
         guard let remote else { return }
-        try await git.run(["fetch", "--prune", "--no-progress", remote], in: url, timeout: .seconds(600))
         if await git.outputIfSuccess(["symbolic-ref", "refs/remotes/\(remote)/HEAD"], in: url) == nil {
             _ = try? await git.run(["remote", "set-head", remote, "--auto"], in: url, timeout: .seconds(60))
         }
+        let tags = options.tags ? [] : ["--no-tags"]
+        if options.scope == .primaryAndLocal, let refspecs = try await narrowFetchRefspecs(remote: remote) {
+            guard !refspecs.isEmpty else { return }
+            try await git.run(["fetch", "--no-progress", "--stdin"] + tags + [remote], in: url, timeout: .seconds(600),
+                              input: Data(refspecs.joined(separator: "\n").utf8))
+        } else {
+            try await git.run(["fetch", "--prune", "--no-progress"] + tags + [remote], in: url, timeout: .seconds(600))
+        }
+    }
+
+    /// Refspecs for the primary branch and the upstreams of local branches that still exist on
+    /// `remote`. Remote-tracking branches of those that were deleted are removed, as `--prune` would.
+    /// nil when the primary branch isn't known, so the caller fetches everything instead.
+    private func narrowFetchRefspecs(remote: String) async throws -> [String]? {
+        let trackingPrefix = "refs/remotes/\(remote)/"
+        guard let head = await git.outputIfSuccess(["symbolic-ref", "refs/remotes/\(remote)/HEAD"], in: url),
+              head.hasPrefix(trackingPrefix) else { return nil }
+        // Remote branch -> local remote-tracking branch.
+        var sources = ["refs/heads/" + head.dropFirst(trackingPrefix.count): head]
+        let upstreams = try await git.output(
+            ["for-each-ref", "--format=%(upstream:remotename)%09%(upstream:remoteref)%09%(upstream)", "refs/heads"], in: url)
+        for line in upstreams.split(separator: "\n") {
+            let parts = line.split(separator: "\t").map(String.init)
+            guard parts.count == 3, parts[0] == remote, parts[1].hasPrefix("refs/heads/"), parts[2].hasPrefix(trackingPrefix) else { continue }
+            sources[parts[1]] = parts[2]
+        }
+        // The server filters by these names (protocol v2), so this stays small on repos with many branches.
+        let listed = try await git.output(["ls-remote", "--heads", remote] + sources.keys.sorted(), in: url, timeout: .seconds(120))
+        let existing = Set(listed.split(separator: "\n").compactMap { $0.split(separator: "\t").last.map(String.init) })
+        let gone = sources.filter { !existing.contains($0.key) }.map(\.value).sorted()
+        if !gone.isEmpty {
+            try await git.run(["update-ref", "--stdin"], in: url,
+                              input: Data(gone.map { "delete \($0)\n" }.joined().utf8))
+        }
+        return sources.filter { existing.contains($0.key) }.map { "+\($0.key):\($0.value)" }.sorted()
     }
 
     /// Moves local tags to where the remote has them, overwriting the local copies.
@@ -509,7 +582,7 @@ public struct GitRepository: Sendable {
             try await dropBlobsExceptCheckedOut()
 
         case .shallow:
-            let snapshot = try await snapshot(maxComparisons: 0)
+            let snapshot = try await snapshot(options: SnapshotOptions(compareAllBranches: false, lineCounts: false))
             guard let primary = snapshot.primaryBranch else {
                 throw GitError(arguments: ["convert"], exitCode: 1, stderr: "cannot determine the primary branch")
             }

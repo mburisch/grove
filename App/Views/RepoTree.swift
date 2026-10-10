@@ -298,6 +298,13 @@ private struct RepoTreeRow: View {
                     }
                     if let mode = repo.snapshot?.mode, mode != .full { ModeChip(mode: mode) }
                     AutoFetchChip(repo: repo)
+                    if repo.showsStorageWarning, let storage = repo.storage {
+                        Button { model.select(.repo(repo.path)) } label: {
+                            Image(systemName: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
+                        }
+                        .buttonStyle(.plain)
+                        .help("\(AppModel.describe(storage)): a clean-up could free space and speed up git. Click to show.")
+                    }
                 }
                 PathText(path: repo.displayPath)
             }
@@ -336,7 +343,7 @@ private struct AutoFetchChip: View {
     let repo: RepoState
 
     var body: some View {
-        let minutes = model.config.fetchInterval(for: repo.path)
+        let minutes = model.settings(for: repo).fetchIntervalMinutes
         if minutes > 0 {
             HStack(spacing: 2) {
                 Image(systemName: "clock.arrow.circlepath")

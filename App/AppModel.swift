@@ -170,6 +170,11 @@ final class AppModel {
         GitRepository(url: repo.url, git: git)
     }
 
+    /// `repo`'s settings with its profile's defaults filled in.
+    func settings(for repo: RepoState) -> EffectiveRepoSettings {
+        config.effectiveSettings(for: repo.path, detected: repo.detectedProfile)
+    }
+
     func repo(at path: String) -> RepoState? {
         repos.first { $0.path == path }
     }
@@ -325,13 +330,17 @@ final class AppModel {
 
     func refresh(_ repo: RepoState) async {
         await repo.enqueue(repo.snapshot == nil ? "Loading…" : "Refreshing…") { [self] in
+            await loadStorage(repo)
             await loadSnapshot(repo)
         }
     }
 
     private func loadSnapshot(_ repo: RepoState) async {
+        // The size picks the profile, so read it before the first (possibly expensive) snapshot.
+        if repo.storage == nil { await loadStorage(repo) }
         do {
-            let snapshot = try await repository(repo).snapshot()
+            let snapshot = try await repository(repo).snapshot(options: settings(for: repo).snapshotOptions,
+                                                               cache: repo.comparisons)
             repo.snapshot = snapshot
             repo.lastRefresh = .now
             // After launch, show pull requests without waiting for the first fetch.
@@ -365,6 +374,27 @@ final class AppModel {
     func loadDetails(_ repo: RepoState, branch: String) async {
         branchDetails[Self.branchKey(repo.path, branch)] = await repository(repo)
             .branchDetails(name: branch, primaryRef: repo.snapshot?.baseRef)
+        await compareOnDemand(repo, branch: branch)
+    }
+
+    /// Compares a branch the snapshot skipped (see `compareAllBranches`) once it's selected.
+    private func compareOnDemand(_ repo: RepoState, branch name: String) async {
+        guard let snapshot = repo.snapshot, let baseRef = snapshot.baseRef, let baseSHA = snapshot.baseSHA,
+              let branch = snapshot.branches.first(where: { $0.name == name }), branch.versusPrimary == nil else { return }
+        let lineCounts = settings(for: repo).lineCounts && branch.worktreePath == nil
+        let result = await repository(repo).comparison(of: branch.commit.sha, to: CompareTarget(ref: baseRef, sha: baseSHA),
+                                                       diff: lineCounts, cache: repo.comparisons)
+        guard let i = repo.snapshot?.branches.firstIndex(where: { $0.name == name && $0.commit == branch.commit }) else { return }
+        repo.snapshot?.branches[i].versusPrimary = result.count
+        if lineCounts { repo.snapshot?.branches[i].committedDiff = result.diff }
+    }
+
+    func loadStorage(_ repo: RepoState) async {
+        let git = repository(repo)
+        async let storage = git.storage()
+        async let prefetch = git.prefetchStatus()
+        repo.storage = await storage
+        repo.prefetch = await prefetch
     }
 
     static func branchKey(_ repoPath: String, _ branch: String) -> String { repoPath + "\0" + branch }
@@ -464,13 +494,14 @@ final class AppModel {
         await repo.enqueue("Fetching…") { [self] in
             repo.lastFetchAttempt = .now
             do {
-                try await repository(repo).fetch(remote: repo.snapshot?.remoteName)
+                try await repository(repo).fetch(remote: repo.snapshot?.remoteName, options: settings(for: repo).fetchOptions)
                 repo.lastError = nil
                 repo.consecutiveFailures = 0
             } catch {
                 repo.fail(error)
                 repo.consecutiveFailures += 1
             }
+            await loadStorage(repo)
             await loadSnapshot(repo)
             if repo.lastError == nil { await loadPullRequests(repo) }
         }
@@ -739,9 +770,81 @@ final class AppModel {
     }
 
     func setFetchInterval(_ minutes: Int?, for repo: RepoState) {
-        var settings = config.settings(for: repo.path)
-        settings.fetchIntervalMinutes = minutes
-        config.repoSettings[repo.path] = settings
+        updateSettings(repo) { $0.fetchIntervalMinutes = minutes }
+    }
+
+    /// Changes `repo`'s settings, refreshing it when that changes what a snapshot computes.
+    func updateSettings(_ repo: RepoState, _ change: (inout RepoSettings) -> Void) {
+        let before = settings(for: repo).snapshotOptions
+        var custom = config.settings(for: repo.path)
+        change(&custom)
+        config.repoSettings[repo.path] = custom
+        if settings(for: repo).snapshotOptions != before { Task { await refresh(repo) } }
+    }
+
+    /// Resets `repo` to the defaults of `profile` (nil = chosen by size).
+    func applyDefaults(_ profile: RepoProfile?, to repo: RepoState) {
+        updateSettings(repo) { $0.applyDefaults(profile) }
+    }
+
+    func setPrefetch(_ enabled: Bool, for repo: RepoState) async {
+        await repo.enqueue(enabled ? "Enabling prefetch…" : "Disabling prefetch…") { [self] in
+            do {
+                try await repository(repo).setPrefetch(enabled: enabled)
+            } catch {
+                repo.fail(error)
+            }
+            await loadStorage(repo)
+        }
+    }
+
+    /// Asks, then runs `git gc` to repack the repository and drop unreachable data.
+    func confirmCleanUp(_ repo: RepoState) async {
+        await loadStorage(repo)
+        let before = repo.storage
+        let alert = NSAlert()
+        alert.messageText = "Clean up \(repo.name)?"
+        var info = "Runs git gc: repacks all objects into one pack and deletes unreachable data older than an hour, "
+            + "such as branches deleted on the remote and leftovers from background prefetches."
+        if let before {
+            info += "\n\nNow: \(Self.describe(before))."
+        }
+        if repo.prefetch?.isActive == true {
+            info += "\n\nBackground prefetch is on and will keep adding data; consider turning it off."
+        }
+        info += "\n\nThis can take a long time on a large repository. Grove runs nothing else on it meanwhile."
+        alert.informativeText = info
+        alert.addButton(withTitle: "Clean Up")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.last?.keyEquivalent = "\u{1b}"
+        NSApp.activate()
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        await repo.enqueue("Cleaning up…") { [self] in
+            do {
+                try await repository(repo).cleanUp()
+                await loadStorage(repo)
+                repo.storageWarningDismissed = false
+                if let before, let after = repo.storage {
+                    let freed = max(0, before.totalBytes - after.totalBytes)
+                    repo.lastMessage = "Cleaned up: freed \(Self.bytes(freed)) (\(Self.bytes(before.totalBytes)) → \(Self.bytes(after.totalBytes)))"
+                } else {
+                    repo.lastMessage = "Cleaned up"
+                }
+            } catch {
+                repo.fail(error)
+            }
+        }
+    }
+
+    static func bytes(_ count: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: count, countStyle: .file)
+    }
+
+    static func describe(_ storage: RepoStorage) -> String {
+        var text = "\(bytes(storage.totalBytes)) in \(storage.packs) pack\(storage.packs == 1 ? "" : "s")"
+        if storage.looseObjects > 0 { text += " and \(storage.looseObjects.formatted()) loose objects" }
+        return text
     }
 
     // MARK: - Clone
@@ -857,7 +960,7 @@ final class AppModel {
         if config.pauseFetchInLowPowerMode && ProcessInfo.processInfo.isLowPowerModeEnabled { return }
         let now = Date.now
         let due = repos.filter { repo in
-            let minutes = config.fetchInterval(for: repo.path)
+            let minutes = settings(for: repo).fetchIntervalMinutes
             guard minutes > 0, repo.activity == nil else { return false }
             let backoff = min(pow(2, Double(repo.consecutiveFailures)), 16)
             guard let last = repo.lastFetch else { return true }
