@@ -26,7 +26,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.github.mburisch.Grove
         SWIFT_VERSION: "6.0"
-        MARKETING_VERSION: "0.1.6"
+        MARKETING_VERSION: "0.1.7"
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "-"
