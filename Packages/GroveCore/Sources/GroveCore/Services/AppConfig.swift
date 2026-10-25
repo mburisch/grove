@@ -162,6 +162,8 @@ public struct AppConfig: Codable, Sendable, Hashable {
     public var pauseFetchInLowPowerMode: Bool = true
     /// Look up GitHub pull requests with the GitHub CLI (`gh`). When off, Grove never runs `gh`.
     public var gitHubPullRequests: Bool = true
+    /// Write every git run and repository operation, with timings, to a file (`DebugLog`).
+    public var debugLog: Bool = false
     /// Repo list sections, in order.
     public var groups: [RepoGroup] = []
     /// Custom order of repos not in any group; unlisted repos follow by name.
@@ -184,6 +186,7 @@ public struct AppConfig: Codable, Sendable, Hashable {
         launchers = try c.decodeIfPresent([Launcher].self, forKey: .launchers) ?? d.launchers
         pauseFetchInLowPowerMode = try c.decodeIfPresent(Bool.self, forKey: .pauseFetchInLowPowerMode) ?? d.pauseFetchInLowPowerMode
         gitHubPullRequests = try c.decodeIfPresent(Bool.self, forKey: .gitHubPullRequests) ?? d.gitHubPullRequests
+        debugLog = try c.decodeIfPresent(Bool.self, forKey: .debugLog) ?? d.debugLog
         groups = try c.decodeIfPresent([RepoGroup].self, forKey: .groups) ?? d.groups
         ungroupedOrder = try c.decodeIfPresent([String].self, forKey: .ungroupedOrder) ?? d.ungroupedOrder
     }

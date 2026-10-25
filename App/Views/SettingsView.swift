@@ -182,6 +182,25 @@ struct SettingsView: View {
                     NSApp.windows.compactMap { $0 as? MainWindow }.first?.resetSize()
                 }
             }
+
+            Section("Troubleshooting") {
+                Toggle("Debug log", isOn: $model.config.debugLog)
+                Text("Writes every git command and repository operation, with how long it waited and ran, to a file per session in \(DebugLog.defaultDirectory.path.abbreviatingWithTilde).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                if let error = model.debugLogError {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                }
+                HStack {
+                    Button("Show in Finder") {
+                        let dir = DebugLog.defaultDirectory
+                        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(dir)
+                    }
+                    Button("Clear Logs") { model.clearDebugLogs() }
+                }
+            }
         }
         .formStyle(.grouped)
         .task(id: model.config.gitPath) {

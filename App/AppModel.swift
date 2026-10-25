@@ -58,6 +58,7 @@ final class AppModel {
             guard config != oldValue else { return }
             gitLimiter.setLimit(config.maxParallelGitRuns)
             if config.gitHubPullRequests != oldValue.gitHubPullRequests { gitHubPullRequestsChanged() }
+            if config.debugLog != oldValue.debugLog { setDebugLog(config.debugLog) }
             persist()
         }
     }
@@ -90,10 +91,50 @@ final class AppModel {
     /// Shared by every runner so the cap holds across repos and operations.
     @ObservationIgnored private let gitLimiter: GitLimiter
 
+    /// Records git runs and repository operations with timings while the Debug log setting is on.
+    @ObservationIgnored private(set) var debugLog: DebugLog?
+    /// Why the debug log couldn't be started, for Settings.
+    private(set) var debugLogError: String?
+
     init() {
         let config = store.load()
         gitLimiter = GitLimiter(limit: config.maxParallelGitRuns)
         self.config = config
+        if config.debugLog { setDebugLog(true) }
+    }
+
+    /// Starts a new log file or stops writing the current one.
+    private func setDebugLog(_ enabled: Bool) {
+        debugLog?.close()
+        debugLog = nil
+        debugLogError = nil
+        if enabled {
+            do {
+                debugLog = try DebugLog()
+            } catch {
+                debugLogError = "Could not create the log file: \(error.localizedDescription)"
+            }
+            let bundle = Bundle.main.infoDictionary
+            debugLog?.log("environment", [
+                "grove": "\(bundle?["CFBundleShortVersionString"] ?? "?") (\(bundle?["CFBundleVersion"] ?? "?"))",
+                "macOS": ProcessInfo.processInfo.operatingSystemVersionString,
+                "cpus": ProcessInfo.processInfo.activeProcessorCount,
+                "gitPath": config.gitPath.isEmpty ? GitRunner.defaultGitPath : config.gitPath.expandingTilde,
+                "maxParallelGitRuns": config.maxParallelGitRuns,
+                "gitHubPullRequests": config.gitHubPullRequests,
+                "defaultFetchIntervalMinutes": config.defaultFetchIntervalMinutes,
+                "repositories": repos.map(\.path),
+            ])
+        }
+        for repo in repos { repo.debugLog = debugLog }
+    }
+
+    /// Deletes all debug logs; while logging is on, a new file is started.
+    func clearDebugLogs() {
+        let enabled = debugLog != nil
+        setDebugLog(false)
+        DebugLog.clear()
+        if enabled { setDebugLog(true) }
     }
 
     /// Every git run, for the Git Output page.
@@ -102,20 +143,28 @@ final class AppModel {
     var gitLogRepo: String?
 
     var git: GitRunner {
-        let log = gitLog
-        return GitRunner(
+        GitRunner(
             gitPath: config.gitPath.isEmpty ? GitRunner.defaultGitPath : config.gitPath.expandingTilde,
             limiter: gitLimiter,
-            onRecord: { run in Task { @MainActor in log.record(run) } }
+            onRecord: recordRun
         )
+    }
+
+    /// Sends a run to the Git Output page and, once finished, to the debug log.
+    private var recordRun: @Sendable (GitRunRecord) -> Void {
+        let log = gitLog
+        let debugLog = debugLog
+        return { run in
+            if run.finished != nil { debugLog?.log(run) }
+            Task { @MainActor in log.record(run) }
+        }
     }
 
     /// Runs the GitHub CLI for pull request lookups, logged with the git runs. Nil when the
     /// setting is off or `gh` isn't installed; nothing else in Grove runs `gh`.
     var gh: GitRunner? {
         guard config.gitHubPullRequests, let path = GitHubPullRequests.ghPath() else { return nil }
-        let log = gitLog
-        return GitRunner(gitPath: path, tool: "gh", onRecord: { run in Task { @MainActor in log.record(run) } })
+        return GitRunner(gitPath: path, tool: "gh", onRecord: recordRun)
     }
 
     /// Looks up pull requests for the repo's worktree and local branches (not the primary branch,
@@ -130,7 +179,10 @@ final class AppModel {
             repo.pullRequests = [:]
             return
         }
-        if let prs = try? await GitHubPullRequests.fetch(repo: gitHub, branches: branches, gh: gh, in: repo.url),
+        let found = await timed(repo, "pullRequests") {
+            try? await GitHubPullRequests.fetch(repo: gitHub, branches: branches, gh: gh, in: repo.url)
+        }
+        if let prs = found,
            config.gitHubPullRequests {  // Not if it was switched off meanwhile.
             repo.pullRequests = prs
         }
@@ -248,7 +300,12 @@ final class AppModel {
     func start() {
         guard !started else { return }
         started = true
-        Task { await rebuildRepoList(); await refreshAll() }
+        Task {
+            debugLog?.log("launch", ["phase": "start"])
+            await rebuildRepoList()
+            await refreshAll()
+            debugLog?.log("launch", ["phase": "refreshed all"])
+        }
         startScheduler()
         startNetworkMonitor()
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -276,6 +333,7 @@ final class AppModel {
     /// Explicit repositories plus everything found under the scan roots, minus exclusions.
     func rebuildRepoList() async {
         let roots = config.scanRoots
+        let scanStart = Date.now
         let scanned = await Task.detached(priority: .utility) {
             roots.flatMap { RepoScanner.scan(root: URL(fileURLWithPath: $0.path.expandingTilde), maxDepth: $0.depth) }
                 .map(\.path)
@@ -292,7 +350,9 @@ final class AppModel {
         let newRepos = paths.map { existing[$0] ?? RepoState(path: $0) }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         let added = newRepos.filter { existing[$0.path] == nil }
+        for repo in added { repo.debugLog = debugLog }
         repos = newRepos
+        debugLog?.log("repositories", ["paths": newRepos.map(\.path), "scanSeconds": lastScan.timeIntervalSince(scanStart)])
         switch pane {
         case .repo(let path), .worktree(let path, _), .branch(let path, _):
             if repo(at: path) == nil { pane = nil }
@@ -339,10 +399,13 @@ final class AppModel {
         // The size picks the profile, so read it before the first (possibly expensive) snapshot.
         if repo.storage == nil { await loadStorage(repo) }
         do {
-            let snapshot = try await repository(repo).snapshot(options: settings(for: repo).snapshotOptions,
-                                                               cache: repo.comparisons)
+            let cachedComparisons = await repo.comparisons.count
+            let snapshot = try await timed(repo, "snapshot") {
+                try await repository(repo).snapshot(options: settings(for: repo).snapshotOptions, cache: repo.comparisons)
+            }
             repo.snapshot = snapshot
             repo.lastRefresh = .now
+            logShape(repo, snapshot, cachedComparisons: cachedComparisons)
             // After launch, show pull requests without waiting for the first fetch.
             if !repo.pullRequestsLoaded && config.gitHubPullRequests {
                 repo.pullRequestsLoaded = true
@@ -351,19 +414,61 @@ final class AppModel {
             // Keep the inspected worktree's details current.
             switch pane {
             case .worktree(let path, let wt) where path == repo.path:
-                await loadDetails(repo, worktreePath: wt)
+                await timed(repo, "details(worktree)") { await loadDetails(repo, worktreePath: wt) }
             case .repo(let path) where path == repo.path:
-                if let main = snapshot.mainWorktree { await loadDetails(repo, worktreePath: main.path) }
+                if let main = snapshot.mainWorktree {
+                    await timed(repo, "details(main worktree)") { await loadDetails(repo, worktreePath: main.path) }
+                }
             case .branch(let path, let name) where path == repo.path:
-                await loadDetails(repo, branch: name)
+                await timed(repo, "details(branch)") { await loadDetails(repo, branch: name) }
             case .diff(let request) where request.repo == repo.path:
-                await loadDetails(repo, target: request.target)
-                if let selection = diffSelection { await loadDiff(selection, in: repo) }
+                await timed(repo, "details(diff)") {
+                    await loadDetails(repo, target: request.target)
+                    if let selection = diffSelection { await loadDiff(selection, in: repo) }
+                }
             default: break
             }
         } catch {
             repo.fail(error)
         }
+    }
+
+    /// Logs how long `body` took as one step of an operation on `repo`.
+    private func timed<T>(_ repo: RepoState, _ step: String, _ body: () async throws -> T) async rethrows -> T {
+        let start = Date.now
+        defer {
+            debugLog?.log("step", ["repo": repo.path, "step": step, "start": debugLog?.offset(start) ?? 0,
+                                 "seconds": Date.now.timeIntervalSince(start)])
+        }
+        return try await body()
+    }
+
+    /// Logs the size of what a snapshot found and the settings it ran with.
+    private func logShape(_ repo: RepoState, _ snapshot: RepoSnapshot, cachedComparisons: Int) {
+        let settings = settings(for: repo)
+        var fields: [String: any Sendable] = [
+            "repo": repo.path,
+            "profile": settings.profile.rawValue,
+            "detectedProfile": repo.detectedProfile.rawValue,
+            "compareAllBranches": settings.compareAllBranches,
+            "lineCounts": settings.lineCounts,
+            "fetchScope": "\(settings.fetchScope)",
+            "fetchIntervalMinutes": settings.fetchIntervalMinutes,
+            "mode": "\(snapshot.mode)",
+            "worktrees": snapshot.worktrees.count,
+            "prunableWorktrees": snapshot.worktrees.filter(\.isPrunable).count,
+            "localBranches": snapshot.branches.count,
+            "remoteBranches": snapshot.remoteBranches.count,
+            "comparedLocal": snapshot.branches.filter { $0.versusPrimary != nil }.count,
+            "comparedRemote": snapshot.remoteBranches.filter { $0.versusPrimary != nil }.count,
+            "cachedComparisonsBefore": cachedComparisons,
+        ]
+        if let storage = repo.storage {
+            fields["storageBytes"] = storage.totalBytes
+            fields["packs"] = storage.packs
+            fields["looseObjects"] = storage.looseObjects
+        }
+        debugLog?.log("repo", fields)
     }
 
     func loadDetails(_ repo: RepoState, worktreePath: String) async {
@@ -390,11 +495,13 @@ final class AppModel {
     }
 
     func loadStorage(_ repo: RepoState) async {
-        let git = repository(repo)
-        async let storage = git.storage()
-        async let prefetch = git.prefetchStatus()
-        repo.storage = await storage
-        repo.prefetch = await prefetch
+        await timed(repo, "storage") {
+            let git = repository(repo)
+            async let storage = git.storage()
+            async let prefetch = git.prefetchStatus()
+            repo.storage = await storage
+            repo.prefetch = await prefetch
+        }
     }
 
     static func branchKey(_ repoPath: String, _ branch: String) -> String { repoPath + "\0" + branch }

@@ -54,10 +54,16 @@ public struct GitRunRecord: Sendable, Hashable, Identifiable {
     public var tool = "git"
     public var arguments: [String]
     public var directory: String?
+    /// When the run was requested; it may then wait for a free slot (`GitLimiter`) until `started`.
+    public var queued: Date?
     public var started: Date
     public var finished: Date?
     public var exitCode: Int32?
+    /// Clipped for display; `stdoutBytes` and `stdoutLines` (lines or NUL-separated entries)
+    /// describe the whole output.
     public var stdout: String = ""
+    public var stdoutBytes = 0
+    public var stdoutLines = 0
     public var stderr: String = ""
     /// Why the run failed without a normal exit: could not start, timed out or was cancelled.
     public var failure: String?
@@ -153,12 +159,15 @@ public struct GitRunner: Sendable {
         input: Data? = nil,
         onStderr: (@Sendable (String) -> Void)? = nil
     ) async throws -> GitResult {
+        let queued = Date.now
         guard let limiter else {
-            return try await recorded(arguments, in: directory, timeout: timeout, check: check, input: input, onStderr: onStderr)
+            return try await recorded(arguments, in: directory, queued: queued, timeout: timeout, check: check,
+                                      input: input, onStderr: onStderr)
         }
         // The timeout starts once a slot is free, so waiting in the queue never times a run out.
         return try await limiter.withSlot {
-            try await recorded(arguments, in: directory, timeout: timeout, check: check, input: input, onStderr: onStderr)
+            try await recorded(arguments, in: directory, queued: queued, timeout: timeout, check: check,
+                               input: input, onStderr: onStderr)
         }
     }
 
@@ -166,12 +175,14 @@ public struct GitRunner: Sendable {
     private func recorded(
         _ arguments: [String],
         in directory: URL?,
+        queued: Date,
         timeout: Duration,
         check: Bool,
         input: Data?,
         onStderr: (@Sendable (String) -> Void)?
     ) async throws -> GitResult {
         var record = GitRunRecord(id: UUID(), tool: tool, arguments: arguments, directory: directory?.path, started: .now)
+        record.queued = queued
         record.failureExpected = !check
         onRecord?(record)
         var outcome: Result<Outcome, Error>
@@ -196,6 +207,8 @@ public struct GitRunner: Sendable {
             result = run.result
             record.exitCode = result.exitCode
             record.stdout = Self.clipped(result.stdout)
+            record.stdoutBytes = result.stdout.utf8.count
+            record.stdoutLines = Self.lineCount(result.stdout)
             record.stderr = Self.clipped(result.stderr)
             if run.timedOut { record.failure = "Timed out after \(timeout)" }
             if attempt > 1 { record.stderr = "(started on attempt \(attempt))\n" + record.stderr }
@@ -318,6 +331,14 @@ public struct GitRunner: Sendable {
         let stdout = await readers.stdout?.finish() ?? ""
         let stderr = await readers.stderr?.finish() ?? ""
         return Outcome(result: GitResult(stdout: stdout, stderr: stderr, exitCode: exitCode), timedOut: timedOut.isSet)
+    }
+
+    /// Lines, or entries of NUL-separated (`-z`) output; a trailing separator ends the last one.
+    static func lineCount(_ text: String) -> Int {
+        let bytes = text.utf8
+        guard let last = bytes.last else { return 0 }
+        let separators = bytes.count { $0 == 0x0A || $0 == 0 }
+        return last == 0x0A || last == 0 ? separators : separators + 1
     }
 
     /// Keeps the log small: the last 32 KB of a stream.

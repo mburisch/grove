@@ -77,15 +77,22 @@ final class RepoState: Identifiable {
         [snapshot?.lastFetchDate, lastFetchAttempt].compactMap { $0 }.max()
     }
 
+    /// Records when operations are queued, start and end (while `activity` shows them).
+    @ObservationIgnored var debugLog: DebugLog?
+
     /// Runs `operation` after any operation already queued for this repository.
     func enqueue(_ label: String, _ operation: @escaping @MainActor () async -> Void) async {
         let previous = tail
+        let id = UUID().uuidString.prefix(8)
+        debugLog?.log("operation", ["repo": path, "label": label, "id": String(id), "phase": "queued"])
         let task = Task { @MainActor in
             await previous?.value
             queued = nil
             activity = label
+            debugLog?.log("operation", ["repo": path, "label": label, "id": String(id), "phase": "start"])
             await operation()
             activity = nil
+            debugLog?.log("operation", ["repo": path, "label": label, "id": String(id), "phase": "end"])
         }
         tail = task
         await task.value
