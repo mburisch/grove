@@ -78,6 +78,9 @@ final class AppModel {
     private(set) var details: [String: WorktreeDetails] = [:]
     /// Details of branches without a worktree, keyed by `branchKey`, loaded when a branch is inspected.
     private(set) var branchDetails: [String: WorktreeDetails] = [:]
+    /// What the shown details were last loaded for after a snapshot, by `detailsKey`, so later
+    /// snapshots that change nothing they depend on don't load them again.
+    @ObservationIgnored private var detailsLoadedFor: [String: DetailsState] = [:]
     /// The file shown in the `.diff` pane and its diff (nil while it loads).
     private(set) var diffSelection: DiffSelection?
     private(set) var currentDiff: FileDiff?
@@ -389,7 +392,13 @@ final class AppModel {
     // MARK: - Refresh / fetch / pull
 
     func refresh(_ repo: RepoState) async {
+        let requested = Date.now
         await repo.enqueue(repo.snapshot == nil ? "Loading…" : "Refreshing…") { [self] in
+            // A fetch, pull or refresh that ran while this one waited already took a newer snapshot.
+            if let last = repo.lastRefresh, last > requested {
+                debugLog?.log("step", ["repo": repo.path, "step": "refresh skipped (newer snapshot)"])
+                return
+            }
             await loadStorage(repo)
             await loadSnapshot(repo)
         }
@@ -400,11 +409,13 @@ final class AppModel {
         if repo.storage == nil { await loadStorage(repo) }
         do {
             let cachedComparisons = await repo.comparisons.count
+            let started = Date.now
             let snapshot = try await timed(repo, "snapshot") {
                 try await repository(repo).snapshot(options: settings(for: repo).snapshotOptions, cache: repo.comparisons)
             }
             repo.snapshot = snapshot
-            repo.lastRefresh = .now
+            // When it started: changes made while it ran may be missing from it.
+            repo.lastRefresh = started
             logShape(repo, snapshot, cachedComparisons: cachedComparisons)
             // After launch, show pull requests without waiting for the first fetch.
             if !repo.pullRequestsLoaded && config.gitHubPullRequests {
@@ -412,25 +423,77 @@ final class AppModel {
                 Task { await loadPullRequests(repo) }
             }
             // Keep the inspected worktree's details current.
-            switch pane {
-            case .worktree(let path, let wt) where path == repo.path:
-                await timed(repo, "details(worktree)") { await loadDetails(repo, worktreePath: wt) }
-            case .repo(let path) where path == repo.path:
-                if let main = snapshot.mainWorktree {
-                    await timed(repo, "details(main worktree)") { await loadDetails(repo, worktreePath: main.path) }
+            let inspected: (DiffTarget, String)? = switch pane {
+            case .worktree(let path, let wt) where path == repo.path: (.worktree(wt), "details(worktree)")
+            case .repo(let path) where path == repo.path: snapshot.mainWorktree.map { (.worktree($0.path), "details(main worktree)") }
+            case .branch(let path, let name) where path == repo.path: (.branch(name), "details(branch)")
+            case .diff(let request) where request.repo == repo.path: (request.target, "details(diff)")
+            default: nil
+            }
+            guard let inspected else { return }
+            let (target, step) = inspected
+            guard needsDetails(repo, target, after: snapshot) else {
+                debugLog?.log("step", ["repo": repo.path, "step": "\(step) skipped (unchanged)"])
+                return
+            }
+            await timed(repo, step) {
+                switch target {
+                case .worktree(let path):
+                    // The snapshot just read this status, so details can skip scans it rules out.
+                    let status = snapshot.worktrees.first { $0.path == path }?.status
+                    await loadDetails(repo, worktreePath: path, knownStatus: status)
+                case .branch(let name):
+                    await loadDetails(repo, branch: name)
                 }
-            case .branch(let path, let name) where path == repo.path:
-                await timed(repo, "details(branch)") { await loadDetails(repo, branch: name) }
-            case .diff(let request) where request.repo == repo.path:
-                await timed(repo, "details(diff)") {
-                    await loadDetails(repo, target: request.target)
-                    if let selection = diffSelection { await loadDiff(selection, in: repo) }
-                }
-            default: break
+                if case .diff = pane, let selection = diffSelection { await loadDiff(selection, in: repo) }
             }
         } catch {
             repo.fail(error)
         }
+    }
+
+    /// What a worktree's or branch's details depend on in a snapshot.
+    struct DetailsState: Hashable {
+        var worktree: WorktreeInfo?
+        var commit: String?
+        var baseRef: String?
+        var baseSHA: String?
+    }
+
+    private static func detailsKey(_ repoPath: String, _ target: DiffTarget) -> String {
+        switch target {
+        case .worktree(let path): "worktree\0" + path
+        case .branch(let name): "branch\0" + branchKey(repoPath, name)
+        }
+    }
+
+    /// Whether the details of `target` must be loaded again after `snapshot`: they aren't loaded
+    /// yet, or something they show may have changed since they were. Remembers the new state.
+    private func needsDetails(_ repo: RepoState, _ target: DiffTarget, after snapshot: RepoSnapshot) -> Bool {
+        let key = Self.detailsKey(repo.path, target)
+        var state = DetailsState(baseRef: snapshot.baseRef, baseSHA: snapshot.baseSHA)
+        let loaded: Bool
+        switch target {
+        case .worktree(let path):
+            loaded = details[path] != nil
+            state.worktree = snapshot.worktrees.first { $0.path == path }
+            // Further edits to files that are already changed only show in line counts; without
+            // those, a changed worktree can't be told apart from an unchanged one.
+            if let wt = state.worktree, !wt.status.isClean && !settings(for: repo).lineCounts {
+                detailsLoadedFor[key] = nil
+                return true
+            }
+        case .branch(let name):
+            loaded = branchDetails[Self.branchKey(repo.path, name)] != nil
+            state.commit = snapshot.branches.first { $0.name == name }?.commit.sha
+        }
+        defer { detailsLoadedFor[key] = state }
+        return !loaded || detailsLoadedFor[key] != state
+    }
+
+    /// Forgets which details are current, so the next snapshot loads them again.
+    func forgetLoadedDetails() {
+        detailsLoadedFor.removeAll()
     }
 
     /// Logs how long `body` took as one step of an operation on `repo`.
@@ -471,9 +534,10 @@ final class AppModel {
         debugLog?.log("repo", fields)
     }
 
-    func loadDetails(_ repo: RepoState, worktreePath: String) async {
+    /// `knownStatus`: the worktree's status from a snapshot taken just now (see `worktreeDetails`).
+    func loadDetails(_ repo: RepoState, worktreePath: String, knownStatus: WorkingTreeStatus? = nil) async {
         details[worktreePath] = await repository(repo)
-            .worktreeDetails(path: worktreePath, primaryRef: repo.snapshot?.baseRef)
+            .worktreeDetails(path: worktreePath, primaryRef: repo.snapshot?.baseRef, knownStatus: knownStatus)
     }
 
     func loadDetails(_ repo: RepoState, branch: String) async {
@@ -598,7 +662,7 @@ final class AppModel {
     }
 
     func fetch(_ repo: RepoState) async {
-        await repo.enqueue("Fetching…") { [self] in
+        await repo.enqueue("Fetching…", coalescing: true) { [self] in
             repo.lastFetchAttempt = .now
             do {
                 try await repository(repo).fetch(remote: repo.snapshot?.remoteName, options: settings(for: repo).fetchOptions)
@@ -645,14 +709,19 @@ final class AppModel {
     func pull(_ repo: RepoState) async {
         await fetch(repo)
         guard repo.lastError == nil else { return }
-        await repo.enqueue("Pulling…") { [self] in
+        await repo.enqueue("Pulling…", coalescing: true) { [self] in
             guard let snapshot = repo.snapshot else { return }
             let git = repository(repo)
+            // The fetch normally took the snapshot moments ago: decide from it instead of reading
+            // every worktree's status again. An older one (a fetch that failed to refresh it) is
+            // checked again worktree by worktree.
+            let isFresh = repo.lastRefresh.map { Date.now.timeIntervalSince($0) < 60 } ?? false
             var updated = 0
             var skipped: [String] = []
             for wt in snapshot.worktrees where !wt.isPrunable {
                 do {
-                    switch try await git.fastForward(worktree: wt.path) {
+                    let outcome = isFresh ? try await git.fastForward(worktree: wt) : try await git.fastForward(worktree: wt.path)
+                    switch outcome {
                     case .updated: updated += 1
                     case .upToDate: break
                     case .skipped(let reason):
@@ -666,7 +735,8 @@ final class AppModel {
                 if case .updated = try? await git.fastForward(branch: branch) { updated += 1 }
             }
             repo.lastMessage = Self.pullSummary(updated: updated, skipped: skipped)
-            await loadSnapshot(repo)
+            // When nothing moved, the fetch's snapshot is still current.
+            if updated > 0 { await loadSnapshot(repo) }
         }
     }
 

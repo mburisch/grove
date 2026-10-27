@@ -245,15 +245,28 @@ public struct GitRepository: Sendable {
     }
 
     /// Changed files and commits for one worktree. `primaryRef` is e.g. `origin/main`.
-    public func worktreeDetails(path: String, primaryRef: String?, maxCommits: Int = 50) async -> WorktreeDetails {
+    ///
+    /// `knownStatus` is the worktree's status from a snapshot taken just now. Each kind of change it
+    /// rules out skips a scan of the working tree, which in a large checkout takes many seconds:
+    /// no untracked files skips listing them, and no tracked changes means the working tree equals
+    /// HEAD, so changes since the base are a diff of two commits.
+    public func worktreeDetails(path: String, primaryRef: String?, knownStatus: WorkingTreeStatus? = nil,
+                                maxCommits: Int = 50) async -> WorktreeDetails {
         let wt = URL(fileURLWithPath: path)
+        let clean = knownStatus.map { !$0.hasTrackedChanges } ?? false
+        let noUntracked = knownStatus?.untracked == 0
         async let head = git.outputIfSuccess(["log", "-1", "--format=\(GitParsers.logFormat)", "HEAD"], in: wt)
-        async let uncommitted = fileChanges(against: "HEAD", in: wt)
-        async let untracked = git.outputIfSuccess(["ls-files", "--others", "--exclude-standard", "-z"], in: wt)
+        async let uncommitted: [FileChange] = clean ? [] : fileChanges(against: "HEAD", in: wt)
+        async let untracked: String? = noUntracked ? nil
+            : git.outputIfSuccess(["ls-files", "--others", "--exclude-standard", "-z"], in: wt)
         async let ahead = outputIf(primaryRef.map {
             ["log", "-n", String(maxCommits), "--format=\(GitParsers.logFormat)", "\($0)..HEAD"]
         }, in: wt)
-        async let sinceBase = changesSinceBase(primaryRef: primaryRef, in: wt)
+        async let sinceBase: [FileChange] = if clean, let primaryRef {
+            fileChanges(between: ["\(primaryRef)...HEAD"], in: wt)
+        } else {
+            changesSinceBase(primaryRef: primaryRef, in: wt)
+        }
 
         let untrackedFiles = (await untracked ?? "").split(separator: "\0").map {
             FileChange(status: "?", path: String($0))
@@ -346,9 +359,9 @@ public struct GitRepository: Sendable {
 
     /// `git diff` of `revs`: one rev compares the working tree, `a...b` compares commits.
     private func fileChanges(between revs: [String], in dir: URL) async -> [FileChange] {
-        async let numstat = git.outputIfSuccess(["diff", "--numstat", "-z", "-M"] + revs, in: dir)
-        async let nameStatus = git.outputIfSuccess(["diff", "--name-status", "-z", "-M"] + revs, in: dir)
-        return GitParsers.parseFileChanges(numstat: await numstat ?? "", nameStatus: await nameStatus ?? "")
+        // One run for statuses and line counts, so the working tree is compared only once.
+        let output = await git.outputIfSuccess(["diff", "--raw", "--numstat", "-z", "-M"] + revs, in: dir)
+        return GitParsers.parseRawNumstat(output ?? "")
     }
 
     private func outputIf(_ arguments: [String]?, in directory: URL) async -> String? {
@@ -447,16 +460,30 @@ public struct GitRepository: Sendable {
 
     /// Fast-forwards a worktree's checked-out branch to its upstream. Never merges or rebases.
     public func fastForward(worktree path: String) async throws -> FastForwardOutcome {
-        let wtURL = URL(fileURLWithPath: path)
         let status = GitParsers.parseStatus(
-            try await git.output(["status", "--porcelain=v2", "--branch"], in: wtURL)
+            try await git.output(["status", "--porcelain=v2", "--branch"], in: URL(fileURLWithPath: path))
         )
-        guard status.branch != nil else { return .skipped("detached HEAD") }
-        guard status.upstream != nil, let ab = status.aheadBehind else { return .skipped("no upstream") }
+        return try await fastForward(worktree: path, branch: status.branch, upstream: status.upstream,
+                                     tracking: status.aheadBehind, status: status.status)
+    }
+
+    /// Like `fastForward(worktree:)`, but decides from `worktree` as a recent snapshot saw it instead
+    /// of reading its status again, which is slow in large checkouts. Worktrees that need nothing
+    /// cost no git run at all. If the worktree changed since, `merge --ff-only` still refuses to
+    /// overwrite local changes or to create a merge.
+    public func fastForward(worktree: WorktreeInfo) async throws -> FastForwardOutcome {
+        try await fastForward(worktree: worktree.path, branch: worktree.branch, upstream: worktree.upstream,
+                              tracking: worktree.tracking, status: worktree.status)
+    }
+
+    private func fastForward(worktree path: String, branch: String?, upstream: String?, tracking: AheadBehind?,
+                             status: WorkingTreeStatus) async throws -> FastForwardOutcome {
+        guard branch != nil else { return .skipped("detached HEAD") }
+        guard upstream != nil, let ab = tracking else { return .skipped("no upstream") }
         if ab.behind == 0 { return .upToDate }
         if ab.ahead > 0 { return .skipped("diverged (\(ab.ahead) local commits)") }
-        if status.status.hasTrackedChanges { return .skipped("uncommitted changes") }
-        try await git.run(["merge", "--ff-only", "--no-stat", "@{upstream}"], in: wtURL, timeout: .seconds(300))
+        if status.hasTrackedChanges { return .skipped("uncommitted changes") }
+        try await git.run(["merge", "--ff-only", "--no-stat", "@{upstream}"], in: URL(fileURLWithPath: path), timeout: .seconds(300))
         return .updated(commits: ab.behind)
     }
 

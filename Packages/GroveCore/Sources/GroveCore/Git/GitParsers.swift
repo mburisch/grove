@@ -181,25 +181,20 @@ public enum GitParsers {
         return result
     }
 
-    /// Parses `git diff --name-status -z`: `X<NUL>path<NUL>`, or `R100<NUL>old<NUL>new<NUL>` for renames/copies.
-    /// Returns the one-letter status keyed by (new) path.
-    public static func parseNameStatus(_ output: String) -> [String: String] {
-        var result: [String: String] = [:]
-        var fields = output.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)[...]
-        while let code = fields.popFirst(), let letter = code.first {
-            if letter == "R" || letter == "C" {
-                _ = fields.popFirst()
-            }
+    /// Parses `git diff --raw --numstat -z`: first the raw entries,
+    /// `:<modes and ids> X<NUL>path<NUL>` or `:<…> R100<NUL>old<NUL>new<NUL>` for renames and copies,
+    /// then the same files as `--numstat -z` records (see `parseNumstat`).
+    public static func parseRawNumstat(_ output: String) -> [FileChange] {
+        var statuses: [String: String] = [:]
+        var fields = output.split(separator: "\0", omittingEmptySubsequences: false).map(String.init)[...]
+        while let field = fields.first, field.hasPrefix(":") {
+            fields.removeFirst()
+            guard let letter = field.split(separator: " ").last?.first else { continue }
+            if letter == "R" || letter == "C" { _ = fields.popFirst() }
             guard let path = fields.popFirst() else { break }
-            result[path] = String(letter)
+            statuses[path] = String(letter)
         }
-        return result
-    }
-
-    /// Combines `--numstat -z` and `--name-status -z` output for the same diff.
-    public static func parseFileChanges(numstat: String, nameStatus: String) -> [FileChange] {
-        let statuses = parseNameStatus(nameStatus)
-        return parseNumstat(numstat).map { entry in
+        return parseNumstat(fields.joined(separator: "\0")).map { entry in
             FileChange(
                 status: statuses[entry.path] ?? (entry.oldPath == nil ? "M" : "R"),
                 path: entry.path,

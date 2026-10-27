@@ -156,7 +156,10 @@ private struct HeaderBar: View {
             }
             Spacer()
 
-            Button { Task { await model.rebuildRepoList(); await model.refreshAll() } } label: {
+            Button {
+                model.forgetLoadedDetails()
+                Task { await model.rebuildRepoList(); await model.refreshAll() }
+            } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
             .keyboardShortcut("r")

@@ -80,20 +80,37 @@ final class RepoState: Identifiable {
     /// Records when operations are queued, start and end (while `activity` shows them).
     @ObservationIgnored var debugLog: DebugLog?
 
-    /// Runs `operation` after any operation already queued for this repository.
-    func enqueue(_ label: String, _ operation: @escaping @MainActor () async -> Void) async {
+    /// Operations queued with `coalescing` that haven't started yet, by label.
+    @ObservationIgnored private var waiting: [String: Task<Void, Never>] = [:]
+
+    /// Runs `operation` after any operation already queued for this repository. With `coalescing`,
+    /// an operation with the same label that is queued but not started yet stands in for this one:
+    /// it starts later than this request, so it does everything this one would.
+    func enqueue(_ label: String, coalescing: Bool = false, _ operation: @escaping @MainActor () async -> Void) async {
+        if coalescing, let pending = waiting[label] {
+            debugLog?.log("operation", ["repo": path, "label": label, "phase": "coalesced"])
+            await pending.value
+            return
+        }
         let previous = tail
-        let id = UUID().uuidString.prefix(8)
-        debugLog?.log("operation", ["repo": path, "label": label, "id": String(id), "phase": "queued"])
+        let id = String(UUID().uuidString.prefix(8))
+        debugLog?.log("operation", ["repo": path, "label": label, "id": id, "phase": "queued"])
         let task = Task { @MainActor in
             await previous?.value
+            if coalescing { waiting[label] = nil }
             queued = nil
             activity = label
-            debugLog?.log("operation", ["repo": path, "label": label, "id": String(id), "phase": "start"])
-            await operation()
+            let start = Date.now
+            debugLog?.log("operation", ["repo": path, "label": label, "id": id, "phase": "start"])
+            let trace = GitTrace(id: id)
+            await GitTrace.$current.withValue(trace) { await operation() }
             activity = nil
-            debugLog?.log("operation", ["repo": path, "label": label, "id": String(id), "phase": "end"])
+            var fields = trace.summary
+            fields.merge(["repo": path, "label": label, "id": id, "phase": "end",
+                          "wallSeconds": (Date.now.timeIntervalSince(start) * 1000).rounded() / 1000]) { $1 }
+            debugLog?.log("operation", fields)
         }
+        if coalescing { waiting[label] = task }
         tail = task
         await task.value
     }

@@ -85,16 +85,18 @@ struct ParserTests {
     }
 
     @Test func fileChanges() {
+        let id = String(repeating: "0", count: 40)
+        let raw = ":100644 100644 \(id) \(id) M\0src/a.swift\0" + ":000000 100644 \(id) \(id) A\0img.png\0"
+            + ":100644 100644 \(id) \(id) R087\0old.txt\0new.txt\0" + ":100644 000000 \(id) \(id) D\0gone.txt\0"
         let numstat = "3\t1\tsrc/a.swift\0-\t-\timg.png\0" + "2\t0\t\0old.txt\0new.txt\0" + "0\t4\tgone.txt\0"
-        let nameStatus = "M\0src/a.swift\0A\0img.png\0R087\0old.txt\0new.txt\0D\0gone.txt\0"
-        let changes = GitParsers.parseFileChanges(numstat: numstat, nameStatus: nameStatus)
+        let changes = GitParsers.parseRawNumstat(raw + numstat)
         #expect(changes.map(\.path) == ["src/a.swift", "img.png", "new.txt", "gone.txt"])
         #expect(changes.map(\.status) == ["M", "A", "R", "D"])
         #expect(changes[0].insertions == 3 && changes[0].deletions == 1)
         #expect(changes[1].insertions == nil)
         #expect(changes[2].oldPath == "old.txt")
         #expect(changes[3].isDeleted)
-        #expect(GitParsers.parseFileChanges(numstat: "", nameStatus: "").isEmpty)
+        #expect(GitParsers.parseRawNumstat("").isEmpty)
     }
 
     @Test func log() {

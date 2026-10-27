@@ -84,6 +84,86 @@ import Testing
         #expect(again.branches.first { $0.name == "feature" }?.versusPrimary == AheadBehind(ahead: 0, behind: 2))
     }
 
+    @Test func fastForwardFromSnapshotSkipsStatus() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        let records = RunLog()
+        _ = try await sb.clone("ffsnap", mode: .full)
+        let repo = GitRepository(url: sb.root.appendingPathComponent("ffsnap"), git: GitRunner(onRecord: { records.add($0) }))
+        try await sb.publish(3)
+        try await repo.fetch()
+
+        // Dirty: refused without running git.
+        try "dirty".write(to: repo.url.appendingPathComponent("file1.txt"), atomically: true, encoding: .utf8)
+        var main = try #require(try await repo.snapshot().mainWorktree)
+        records.reset()
+        #expect(try await repo.fastForward(worktree: main) == .skipped("uncommitted changes"))
+        #expect(records.total == 0)
+
+        // Clean and behind: only the merge runs.
+        try await sb.git.run(["checkout", "--", "file1.txt"], in: repo.url)
+        main = try #require(try await repo.snapshot().mainWorktree)
+        records.reset()
+        #expect(try await repo.fastForward(worktree: main) == .updated(commits: 3))
+        #expect(records.total == 1 && records.count("merge") == 1)
+
+        // Up to date: nothing runs.
+        main = try #require(try await repo.snapshot().mainWorktree)
+        records.reset()
+        #expect(try await repo.fastForward(worktree: main) == .upToDate)
+        #expect(records.total == 0)
+    }
+
+    @Test func detailsFromKnownStatusMatchFullScan() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        let records = RunLog()
+        _ = try await sb.clone("known", mode: .full)
+        let repo = GitRepository(url: sb.root.appendingPathComponent("known"), git: GitRunner(onRecord: { records.add($0) }))
+        try await sb.git.run(["checkout", "-q", "-b", "topic"], in: repo.url)
+        try await sb.commit(in: repo.url, file: "new.txt", content: "n")
+        try await sb.git.run(["mv", "file1.txt", "renamed.txt"], in: repo.url)
+        try await sb.git.run(["-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "-m", "rename"], in: repo.url)
+        try await sb.publish(1)
+        try await repo.fetch()
+
+        // Clean: no working-tree scans, same result.
+        var snap = try await repo.snapshot()
+        var main = try #require(snap.mainWorktree)
+        let full = await repo.worktreeDetails(path: main.path, primaryRef: snap.baseRef)
+        records.reset()
+        let lean = await repo.worktreeDetails(path: main.path, primaryRef: snap.baseRef, knownStatus: main.status)
+        #expect(lean == full)
+        #expect(records.count("ls-files") == 0 && records.count("merge-base") == 0)
+        #expect(records.count("diff") == 1)
+        let rename = try #require(lean.changedSinceBase.first { $0.path == "renamed.txt" })
+        #expect(rename.status == "R" && rename.oldPath == "file1.txt")
+        #expect(lean.changedSinceBase.first { $0.path == "new.txt" }?.status == "A")
+
+        // Dirty with untracked files: scans as before.
+        try "edit".write(to: repo.url.appendingPathComponent("file2.txt"), atomically: true, encoding: .utf8)
+        try "u".write(to: repo.url.appendingPathComponent("untracked.txt"), atomically: true, encoding: .utf8)
+        snap = try await repo.snapshot()
+        main = try #require(snap.mainWorktree)
+        let dirtyFull = await repo.worktreeDetails(path: main.path, primaryRef: snap.baseRef)
+        let dirtyLean = await repo.worktreeDetails(path: main.path, primaryRef: snap.baseRef, knownStatus: main.status)
+        #expect(dirtyLean == dirtyFull)
+        #expect(dirtyLean.uncommitted.map(\.status) == ["M", "?"])
+    }
+
+    @Test func traceCountsRunsOfOneOperation() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        let repo = try await sb.clone("trace", mode: .full)
+        let trace = GitTrace(id: "op1")
+        _ = try await GitTrace.$current.withValue(trace) { try await repo.snapshot() }
+        let summary = trace.summary
+        let calls = try #require(summary["gitCalls"] as? Int)
+        let bySubcommand = try #require(summary["gitCallsBySubcommand"] as? [String: Int])
+        #expect(calls > 0 && bySubcommand.values.reduce(0, +) == calls)
+        #expect(bySubcommand["status"] == 1)
+    }
+
     @Test func storageAndPrefetch() async throws {
         let sb = try await Sandbox()
         defer { sb.cleanup() }
@@ -154,4 +234,5 @@ private final class RunLog: @unchecked Sendable {
     func add(_ record: GitRunRecord) { lock.withLock { if record.finished == nil { started.append(record) } } }
     func reset() { lock.withLock { started = [] } }
     func count(_ command: String) -> Int { lock.withLock { started.filter { $0.arguments.first == command }.count } }
+    var total: Int { lock.withLock { started.count } }
 }

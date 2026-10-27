@@ -81,6 +81,13 @@ public struct GitRunRecord: Sendable, Hashable, Identifiable {
     }
     public var duration: TimeInterval? { finished.map { $0.timeIntervalSince(started) } }
     public var commandLine: String { ([tool] + arguments).joined(separator: " ") }
+    /// The `GitTrace` (operation) the run was made for, if any.
+    public var operation: String?
+    /// "status", "diff", … ("gh pr" for GitHub lookups).
+    public var subcommand: String {
+        let name = arguments.first { !$0.hasPrefix("-") } ?? ""
+        return tool == "git" ? name : "\(tool) \(name)"
+    }
 
     /// True for read-only lookups (status, rev-parse, log, …) that Grove runs to refresh its view,
     /// as opposed to actions like fetch, pull or worktree add.
@@ -184,6 +191,9 @@ public struct GitRunner: Sendable {
         var record = GitRunRecord(id: UUID(), tool: tool, arguments: arguments, directory: directory?.path, started: .now)
         record.queued = queued
         record.failureExpected = !check
+        let trace = GitTrace.current
+        record.operation = trace?.id
+        defer { trace?.add(record) }
         onRecord?(record)
         var outcome: Result<Outcome, Error>
         var attempt = 1
