@@ -182,6 +182,22 @@ private struct GitTuningRows: View {
                 }
                 .help("\(setting.option.key): \(setting.current ?? "not set")")
             }
+            Divider()
+            // A Grove setting, not git's: takes effect right away, no Apply needed.
+            VStack(alignment: .leading, spacing: 1) {
+                Toggle("Refresh these caches hourly", isOn: Binding(
+                    get: { model.config.settings(for: repo.path).refreshIndexCaches == true },
+                    set: { on in model.updateSettings(repo) { $0.refreshIndexCaches = on ? true : nil } }
+                ))
+                .disabled(!tuning.usesIndexCaches)
+                Text("Lets Grove's git status save the file system monitor and untracked cache about once an hour, "
+                     + "so they stay fresh when you rarely run git yourself. While that status runs, git commands "
+                     + "that change the index (commit, checkout, rebase) fail with “index.lock exists”; run them again.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 20)
+            }
         }
         .onAppear { wanted = tuning.enabled }
         .onChange(of: tuning) { wanted = tuning.enabled }

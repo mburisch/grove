@@ -533,12 +533,13 @@ final class AppModel {
         snapshotWrites.async { try? store.save(snapshot, for: path) }
     }
 
-    /// Worktrees whose status may write the index in the next snapshot: in a repo with the file
-    /// system monitor or untracked cache on, those not written by Grove within the last hour. Rare
-    /// enough that a git command of the user's seldom finds the index locked (it works on retry),
-    /// often enough that the caches don't go stale when the user's own git rarely writes the index.
+    /// Worktrees whose status may write the index in the next snapshot: when the repo opted in
+    /// (`RepoSettings.refreshIndexCaches`) and has the file system monitor or untracked cache on,
+    /// those not written by Grove within the last hour. That status holds `index.lock` while it
+    /// runs, so a git command of the user's that changes the index can fail then (it works on retry).
     private func indexWritesDue(_ repo: RepoState) -> Set<String> {
-        guard repo.tuning?.usesIndexCaches == true, let worktrees = repo.snapshot?.worktrees else { return [] }
+        guard config.settings(for: repo.path).refreshIndexCaches == true, repo.tuning?.usesIndexCaches == true,
+              let worktrees = repo.snapshot?.worktrees else { return [] }
         return Set(worktrees.filter { !$0.isPrunable }.map(\.path).filter { path in
             repo.indexWrittenAt[path].map { Date.now.timeIntervalSince($0) >= 3600 } ?? true
         })

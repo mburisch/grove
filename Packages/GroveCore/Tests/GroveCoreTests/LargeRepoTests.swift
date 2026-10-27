@@ -191,6 +191,20 @@ import Testing
         #expect(many.enabled == [.manyFiles, .untrackedCache])
     }
 
+    @Test func indexCacheRefreshIsOptInAndOutsideProfiles() throws {
+        var settings = RepoSettings()
+        #expect(settings.refreshIndexCaches == nil)  // Off unless the user turns it on.
+        settings.refreshIndexCaches = true
+        #expect(!settings.hasOverrides)
+        settings.applyDefaults(.large)
+        #expect(settings.refreshIndexCaches == true)  // Use Defaults doesn't undo the opt-in.
+
+        var config = AppConfig()
+        config.repoSettings["/r"] = settings
+        let decoded = try JSONDecoder().decode(AppConfig.self, from: JSONEncoder().encode(config))
+        #expect(decoded.settings(for: "/r").refreshIndexCaches == true)
+    }
+
     @Test func tuningTurnsSettingsOnAndOff() async throws {
         let sb = try await Sandbox()
         defer { sb.cleanup() }

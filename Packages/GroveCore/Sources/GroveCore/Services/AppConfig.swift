@@ -55,6 +55,11 @@ public struct RepoSettings: Codable, Sendable, Hashable {
     public var lineCounts: Bool?
     /// Count untracked files in worktree status (`git status` without `--untracked-files=no`).
     public var countUntracked: Bool?
+    /// Let a snapshot's status write the index about hourly in repos with the file system monitor
+    /// or untracked cache on, so those stay fresh when the user's own git rarely writes the index.
+    /// Off (nil) by default: while that status runs it holds `index.lock`, and the user's git
+    /// commands that change the index fail until it's done. Not part of the profile defaults.
+    public var refreshIndexCaches: Bool?
 
     public init(fetchIntervalMinutes: Int? = nil, shallowDepth: Int? = nil) {
         self.fetchIntervalMinutes = fetchIntervalMinutes
