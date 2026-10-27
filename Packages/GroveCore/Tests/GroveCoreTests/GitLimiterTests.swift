@@ -60,6 +60,55 @@ import Testing
     #expect(records.last?.lane == "normal")
 }
 
+@Test func higherPriorityWaiterGoesFirst() async throws {
+    let limiter = GitLimiter(limit: 1)
+    let order = Order()
+    let holder = Task { try await limiter.withSlot { try await Task.sleep(for: .milliseconds(100)) } }
+    try await Task.sleep(for: .milliseconds(20))
+    let timer = Task(priority: .utility) { try await limiter.withSlot { order.add("timer") } }
+    try await Task.sleep(for: .milliseconds(20))
+    let user = Task(priority: .userInitiated) { try await limiter.withSlot { order.add("user") } }
+    try await holder.value
+    try await user.value
+    try await timer.value
+    #expect(order.items == ["user", "timer"])
+}
+
+@Test func heavyRunsAreRecognized() {
+    #expect(GitRunner.isHeavy(["fetch", "--prune", "origin"]))
+    #expect(GitRunner.isHeavy(["merge", "--ff-only", "@{upstream}"]))
+    #expect(GitRunner.isHeavy(["worktree", "add", "/tmp/x", "b"]))
+    #expect(!GitRunner.isHeavy(["worktree", "list", "--porcelain"]))
+    #expect(!GitRunner.isHeavy(["status", "--porcelain=v2"]))
+}
+
+@Test func heavyRunsWaitForTheHeavySlotOnly() async throws {
+    let heavy = GitLimiter(limit: 1, name: "heavy")
+    let holder = Task { try await heavy.withSlot { try await Task.sleep(for: .seconds(5)) } }
+    defer { holder.cancel() }
+    try await Task.sleep(for: .milliseconds(20))
+
+    var git = GitRunner(limiter: GitLimiter(limit: 2))
+    git.heavyLimiter = heavy
+    let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    // A quick run isn't held up by the busy heavy slot…
+    let start = Date.now
+    _ = try await git.run(["--version"], in: dir)
+    #expect(Date.now.timeIntervalSince(start) < 2)
+    // …but a heavy one waits for it.
+    let fetch = Task { try await git.run(["fetch", "--dry-run"], in: dir, check: false) }
+    try await Task.sleep(for: .milliseconds(300))
+    fetch.cancel()
+    await #expect(throws: CancellationError.self) { try await fetch.value }
+}
+
+private final class Order: @unchecked Sendable {
+    private let lock = NSLock()
+    private var all: [String] = []
+    func add(_ item: String) { lock.withLock { all.append(item) } }
+    var items: [String] { lock.withLock { all } }
+}
+
 private final class Records: @unchecked Sendable {
     private let lock = NSLock()
     private var all: [GitRunRecord] = []

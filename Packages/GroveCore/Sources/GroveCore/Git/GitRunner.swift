@@ -118,6 +118,9 @@ public struct GitRunner: Sendable {
     public var tool: String
     /// Shared cap on concurrent git processes; nil runs without a limit.
     public var limiter: GitLimiter?
+    /// An extra cap for runs that read or write a lot of the disk (`isHeavy`), taken before a
+    /// `limiter` slot so a heavy run never holds one while it waits; nil runs them like any other.
+    public var heavyLimiter: GitLimiter?
     /// Receives every run when it starts and when it ends, for the output log.
     public var onRecord: (@Sendable (GitRunRecord) -> Void)?
 
@@ -169,14 +172,33 @@ public struct GitRunner: Sendable {
         onStderr: (@Sendable (String) -> Void)? = nil
     ) async throws -> GitResult {
         let queued = Date.now
-        guard let limiter else {
-            return try await recorded(arguments, in: directory, queued: queued, timeout: timeout, check: check,
-                                      input: input, onStderr: onStderr)
-        }
+        let heavy = Self.isHeavy(arguments) ? heavyLimiter : nil
         // The timeout starts once a slot is free, so waiting in the queue never times a run out.
-        return try await limiter.withSlot {
-            try await recorded(arguments, in: directory, queued: queued, timeout: timeout, check: check,
-                               input: input, onStderr: onStderr)
+        return try await Self.withSlot(of: heavy) {
+            try await Self.withSlot(of: limiter) {
+                try await recorded(arguments, in: directory, queued: queued, timeout: timeout, check: check,
+                                   input: input, onStderr: onStderr)
+            }
+        }
+    }
+
+    private static func withSlot(of limiter: GitLimiter?, _ body: () async throws -> GitResult) async throws -> GitResult {
+        guard let limiter else { return try await body() }
+        return try await limiter.withSlot(body)
+    }
+
+    /// Runs that move a lot of data on disk: transfers, merges and checkouts that rewrite the
+    /// working tree, and repacking.
+    public static func isHeavy(_ arguments: [String]) -> Bool {
+        let words = arguments.filter { !$0.hasPrefix("-") }
+        switch words.first ?? "" {
+        case "fetch", "pull", "clone", "merge", "reset", "checkout", "gc", "repack", "prune",
+             "pack-objects", "maintenance":
+            return true
+        case "worktree":
+            return words.dropFirst().first == "add"
+        default:
+            return false
         }
     }
 

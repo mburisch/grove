@@ -1,7 +1,9 @@
 import Foundation
 
-/// Caps how many git processes run at once. Callers beyond the limit wait in FIFO order;
-/// a waiting caller that is cancelled leaves the queue and throws `CancellationError`.
+/// Caps how many git processes run at once. Callers beyond the limit wait; a free slot goes to
+/// the waiter whose task has the highest priority (so work the user asked for overtakes timer
+/// work started at `.utility`), and among equal priorities to the longest-waiting one. A waiting
+/// caller that is cancelled leaves the queue and throws `CancellationError`.
 public final class GitLimiter: @unchecked Sendable {
     public static let defaultLimit = 4
     /// Slots of the lane for large repositories. Two, so a long scan of a big checkout doesn't
@@ -14,7 +16,7 @@ public final class GitLimiter: @unchecked Sendable {
     private let lock = NSLock()
     private var limit: Int
     private var running = 0
-    private var waiters: [(id: UUID, continuation: CheckedContinuation<Void, Error>)] = []
+    private var waiters: [(id: UUID, priority: UInt8, continuation: CheckedContinuation<Void, Error>)] = []
     /// Waiters cancelled before their continuation was queued.
     private var cancelled: Set<UUID> = []
 
@@ -41,6 +43,7 @@ public final class GitLimiter: @unchecked Sendable {
 
     private func acquire() async throws {
         let id = UUID()
+        let priority = Task.currentPriority.rawValue
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 let result: Result<Void, Error>? = lock.withLock {
@@ -49,7 +52,7 @@ public final class GitLimiter: @unchecked Sendable {
                         running += 1
                         return .success(())
                     }
-                    waiters.append((id, continuation))
+                    waiters.append((id, priority, continuation))
                     return nil
                 }
                 if let result { continuation.resume(with: result) }
@@ -76,12 +79,13 @@ public final class GitLimiter: @unchecked Sendable {
         ready.forEach { $0.resume() }
     }
 
-    /// Hands free slots to the longest-waiting callers. Call with the lock held.
+    /// Hands free slots to the highest-priority, then longest-waiting callers. Call with the lock held.
     private func dequeueReady() -> [CheckedContinuation<Void, Error>] {
         var ready: [CheckedContinuation<Void, Error>] = []
-        while running < limit, !waiters.isEmpty {
+        while running < limit, let top = waiters.map(\.priority).max(),
+              let index = waiters.firstIndex(where: { $0.priority == top }) {
             running += 1
-            ready.append(waiters.removeFirst().continuation)
+            ready.append(waiters.remove(at: index).continuation)
         }
         return ready
     }

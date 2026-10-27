@@ -63,7 +63,9 @@ final class AppModel {
         }
     }
     private(set) var repos: [RepoState] = []
-    var pane: Pane?
+    var pane: Pane? {
+        didSet { if pane != oldValue { cancelDetailLoads() } }
+    }
     var filter = ""
     private(set) var isOnline = true
     var clone = CloneJob()
@@ -81,6 +83,10 @@ final class AppModel {
     /// What the shown details were last loaded for after a snapshot, by `detailsKey`, so later
     /// snapshots that change nothing they depend on don't load them again.
     @ObservationIgnored private var detailsLoadedFor: [String: DetailsState] = [:]
+    /// Loads of details for the shown pane, cancelled (with their git runs) when it changes.
+    @ObservationIgnored private var detailLoads: [UUID: Task<Void, Never>] = [:]
+    /// Load of the diff shown in the `.diff` pane, cancelled when another file or pane is shown.
+    @ObservationIgnored private var diffLoad: Task<Void, Never>?
     /// The file shown in the `.diff` pane and its diff (nil while it loads).
     private(set) var diffSelection: DiffSelection?
     private(set) var currentDiff: FileDiff?
@@ -96,6 +102,9 @@ final class AppModel {
     /// A separate lane for repos with the large profile, so their slow runs (a status that walks a
     /// huge checkout) never take the slots other repos' quick runs need.
     @ObservationIgnored private let largeRepoLimiter = GitLimiter(limit: GitLimiter.largeRepoLimit, name: "large")
+    /// Lets large repos run one heavy command (fetch, merge, repack, …) at a time between them, so
+    /// they don't compete for the disk and the large lane's other slot stays free for quick runs.
+    @ObservationIgnored private let heavyRunLimiter = GitLimiter(limit: 1, name: "heavy")
 
     /// Records git runs and repository operations with timings while the Debug log setting is on.
     @ObservationIgnored private(set) var debugLog: DebugLog?
@@ -231,7 +240,10 @@ final class AppModel {
 
     func repository(_ repo: RepoState) -> GitRepository {
         var runner = git
-        if isLarge(repo) { runner.limiter = largeRepoLimiter }
+        if isLarge(repo) {
+            runner.limiter = largeRepoLimiter
+            runner.heavyLimiter = heavyRunLimiter
+        }
         return GitRepository(url: repo.url, git: runner)
     }
 
@@ -446,17 +458,22 @@ final class AppModel {
                 debugLog?.log("step", ["repo": repo.path, "step": "\(step) skipped (unchanged)"])
                 return
             }
-            await timed(repo, step) {
-                switch target {
-                case .worktree(let path):
-                    // The snapshot just read this status, so details can skip scans it rules out.
-                    let status = snapshot.worktrees.first { $0.path == path }?.status
-                    await loadDetails(repo, worktreePath: path, knownStatus: status)
-                case .branch(let name):
-                    await loadDetails(repo, branch: name)
+            let load = startDetailLoad { [self] in
+                await timed(repo, step) {
+                    switch target {
+                    case .worktree(let path):
+                        // The snapshot just read this status, so details can skip scans it rules out.
+                        let status = snapshot.worktrees.first { $0.path == path }?.status
+                        await loadDetails(repo, worktreePath: path, knownStatus: status)
+                    case .branch(let name):
+                        await loadDetails(repo, branch: name)
+                    }
+                    if case .diff = pane, let selection = diffSelection { await loadDiff(selection, in: repo) }
                 }
-                if case .diff = pane, let selection = diffSelection { await loadDiff(selection, in: repo) }
             }
+            await load.value
+            // Left for another pane before they loaded: load them in full next time.
+            if load.isCancelled { detailsLoadedFor[Self.detailsKey(repo.path, target)] = nil }
         } catch {
             repo.fail(error)
         }
@@ -546,14 +563,37 @@ final class AppModel {
 
     /// `knownStatus`: the worktree's status from a snapshot taken just now (see `worktreeDetails`).
     func loadDetails(_ repo: RepoState, worktreePath: String, knownStatus: WorkingTreeStatus? = nil) async {
-        details[worktreePath] = await repository(repo)
+        let loaded = await repository(repo)
             .worktreeDetails(path: worktreePath, primaryRef: repo.snapshot?.baseRef, knownStatus: knownStatus)
+        // A cancelled load's git runs were stopped, so what came back is incomplete.
+        guard !Task.isCancelled else { return }
+        details[worktreePath] = loaded
     }
 
     func loadDetails(_ repo: RepoState, branch: String) async {
-        branchDetails[Self.branchKey(repo.path, branch)] = await repository(repo)
-            .branchDetails(name: branch, primaryRef: repo.snapshot?.baseRef)
+        let loaded = await repository(repo).branchDetails(name: branch, primaryRef: repo.snapshot?.baseRef)
+        guard !Task.isCancelled else { return }
+        branchDetails[Self.branchKey(repo.path, branch)] = loaded
         await compareOnDemand(repo, branch: branch)
+    }
+
+    /// Runs `body` as a load for the shown pane; it is cancelled when the pane changes.
+    @discardableResult
+    private func startDetailLoad(_ body: @escaping @MainActor () async -> Void) -> Task<Void, Never> {
+        let id = UUID()
+        let task = Task { @MainActor in
+            await body()
+            detailLoads[id] = nil
+        }
+        detailLoads[id] = task
+        return task
+    }
+
+    private func cancelDetailLoads() {
+        detailLoads.values.forEach { $0.cancel() }
+        detailLoads = [:]
+        diffLoad?.cancel()
+        diffLoad = nil
     }
 
     /// Compares a branch the snapshot skipped (see `compareAllBranches`) once it's selected.
@@ -585,15 +625,15 @@ final class AppModel {
         self.pane = pane
         switch pane {
         case .worktree(let path, let wt):
-            if let repo = repo(at: path) { Task { await loadDetails(repo, worktreePath: wt) } }
+            if let repo = repo(at: path) { startDetailLoad { await self.loadDetails(repo, worktreePath: wt) } }
         case .branch(let path, let name):
             // Reveal the row in the tree when selected from elsewhere (the repo inspector).
             collapsed.remove(path)
             branchesExpanded.insert(path)
-            if let repo = repo(at: path) { Task { await loadDetails(repo, branch: name) } }
+            if let repo = repo(at: path) { startDetailLoad { await self.loadDetails(repo, branch: name) } }
         case .repo(let path):
             if let repo = repo(at: path), let main = repo.mainWorktree {
-                Task { await loadDetails(repo, worktreePath: main.path) }
+                startDetailLoad { await self.loadDetails(repo, worktreePath: main.path) }
             }
         default: break
         }
@@ -605,9 +645,9 @@ final class AppModel {
         pane = .diff(request)
         diffSelection = nil
         currentDiff = nil
-        Task {
+        startDetailLoad { [self] in
             if diffSections(for: request).isEmpty { await loadDetails(repo, target: request.target) }
-            guard pane == .diff(request) else { return }
+            guard !Task.isCancelled, pane == .diff(request) else { return }
             if let first = selection ?? diffSections(for: request).lazy.compactMap({ section in
                 section.files.first.map { DiffSelection(file: $0, scope: section.scope) }
             }).first {
@@ -620,13 +660,14 @@ final class AppModel {
         guard case .diff(let request) = pane, let repo = repo(at: request.repo) else { return }
         diffSelection = selection
         currentDiff = nil
-        Task { await loadDiff(selection, in: repo) }
+        diffLoad?.cancel()
+        diffLoad = Task { await loadDiff(selection, in: repo) }
     }
 
     private func loadDiff(_ selection: DiffSelection, in repo: RepoState) async {
         let diff = await repository(repo).fileDiff(selection.file, scope: selection.scope)
         // Ignore a slow load after another file was selected.
-        if diffSelection == selection { currentDiff = diff }
+        if !Task.isCancelled, diffSelection == selection { currentDiff = diff }
     }
 
     private func loadDetails(_ repo: RepoState, target: DiffTarget) async {
@@ -666,7 +707,7 @@ final class AppModel {
         await withTaskGroup(of: Void.self) { group in
             for repo in repos where repo.activity == nil {
                 if let last = repo.lastRefresh, Date.now.timeIntervalSince(last) < age { continue }
-                group.addTask { await self.refresh(repo) }
+                group.addTask(priority: priority(for: repo)) { await self.refresh(repo) }
             }
         }
     }
@@ -1130,8 +1171,10 @@ final class AppModel {
 
     // MARK: - Scheduler
 
+    /// Timer and network-triggered work runs at `.utility`: its git runs wait behind those of
+    /// actions the user started (see `GitLimiter`).
     private func startScheduler() {
-        scheduler = Task { @MainActor [weak self] in
+        scheduler = Task(priority: .utility) { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
                 guard let self else { return }
@@ -1160,7 +1203,7 @@ final class AppModel {
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
             let online = path.status == .satisfied
-            Task { @MainActor in
+            Task(priority: .utility) { @MainActor in
                 guard let self else { return }
                 let cameOnline = online && !self.isOnline
                 self.isOnline = online
@@ -1187,6 +1230,8 @@ final class AppModel {
             await body(repo)
             repo.queued = nil
         }
+        // The repo on screen goes first.
+        let items = items.filter { $0.path == inspectedRepo } + items.filter { $0.path != inspectedRepo }
         let large = items.filter(isLarge)
         let others = items.filter { !isLarge($0) }
         async let largeLane: Void = runLane(large, limit: 1, run)
@@ -1200,12 +1245,27 @@ final class AppModel {
             var iterator = items.makeIterator()
             for _ in 0..<limit {
                 guard let next = iterator.next() else { break }
-                group.addTask { await run(next) }
+                group.addTask(priority: priority(for: next)) { await run(next) }
             }
             for await _ in group {
-                if let next = iterator.next() { group.addTask { await run(next) } }
+                if let next = iterator.next() { group.addTask(priority: priority(for: next)) { await run(next) } }
             }
         }
+    }
+
+    /// The repo whose page, worktree, branch or diff is shown.
+    private var inspectedRepo: String? {
+        switch pane {
+        case .repo(let path), .worktree(let path, _), .branch(let path, _): path
+        case .diff(let request): request.repo
+        default: nil
+        }
+    }
+
+    /// Raised for the repo on screen, so its git runs go ahead of other repos' in a batch;
+    /// nil keeps the caller's priority.
+    private func priority(for repo: RepoState) -> TaskPriority? {
+        repo.path == inspectedRepo ? .userInitiated : nil
     }
 }
 
