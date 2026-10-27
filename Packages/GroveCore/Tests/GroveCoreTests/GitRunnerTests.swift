@@ -50,6 +50,18 @@ import Testing
     #expect(records.latest?.failure?.hasPrefix("Couldn't start git") == true)
 }
 
+@Test func cancelledRunNeverStartsGit() async throws {
+    let records = Records()
+    // A git that can't start tells "not started" (cancelled) apart from "tried to start".
+    let git = GitRunner(gitPath: "/nonexistent/git", onRecord: { records.add($0) })
+    let task = Task {
+        withUnsafeCurrentTask { $0?.cancel() }
+        _ = try await git.run(["--version"])
+    }
+    await #expect(throws: CancellationError.self) { try await task.value }
+    #expect(records.latest?.failure == "Cancelled")
+}
+
 @Test func queriesAreToldApartFromActions() {
     func record(_ args: String) -> GitRunRecord {
         GitRunRecord(id: UUID(), arguments: args.split(separator: " ").map(String.init), directory: nil, started: .now)

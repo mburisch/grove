@@ -234,7 +234,12 @@ public struct GitRunner: Sendable {
                                                     environment: environment, onStderr: onStderr))
             } catch let failure as LaunchFailure where failure.isTransient && attempt < Self.launchAttempts {
                 attempt += 1
-                try? await Task.sleep(for: .milliseconds(100 * attempt))
+                do {
+                    try await Task.sleep(for: .milliseconds(100 * attempt))
+                } catch {
+                    outcome = .failure(error)
+                    break
+                }
                 continue
             } catch {
                 outcome = .failure(error)
@@ -307,6 +312,8 @@ public struct GitRunner: Sendable {
         environment: [String: String],
         onStderr: (@Sendable (String) -> Void)?
     ) async throws -> Outcome {
+        // Cancelled while waiting for a slot: don't start git only to throw its output away.
+        try Task.checkCancellation()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: gitPath)
         process.arguments = arguments
@@ -346,6 +353,8 @@ public struct GitRunner: Sendable {
                     continuation.resume(throwing: LaunchFailure(error: error as NSError))
                     return
                 }
+                // Cancelled between the check above and the start: `onCancel` found nothing running.
+                if Task.isCancelled { process.terminate() }
                 // Started right away so a child writing more than a pipe buffer never blocks.
                 readers.stdout = StreamReader(stdoutPipe.fileHandleForReading)
                 readers.stderr = StreamReader(stderrPipe.fileHandleForReading) { data in

@@ -486,6 +486,7 @@ final class AppModel {
             saveSnapshot(snapshot, of: repo)
             // When it started: changes made while it ran may be missing from it.
             repo.lastRefresh = started
+            repo.snapshotTaken = (repo.operationNumber, .now)
             logShape(repo, snapshot, cachedComparisons: cachedComparisons)
             // After launch, show pull requests without waiting for the first fetch.
             if !repo.pullRequestsLoaded && config.gitHubPullRequests {
@@ -781,10 +782,12 @@ final class AppModel {
     /// `background`: a scheduled fetch. In a large repository it skips `gc --auto` (no surprise
     /// repack of gigabytes; Clean Up does that) and prunes deleted remote branches at most daily.
     func fetch(_ repo: RepoState, background: Bool = false) async {
-        await repo.enqueue("Fetching…", coalescing: true) { [self] in
+        let lighter = background && isLarge(repo)
+        // A user's fetch never waits for a lighter background one in its place.
+        await repo.enqueue("Fetching…", coalescing: true, variant: lighter ? "background" : "") { [self] in
             repo.lastFetchAttempt = .now
             var options = settings(for: repo).fetchOptions
-            if background && isLarge(repo) {
+            if lighter {
                 options.autoGC = false
                 options.prune = repo.lastPrune.map { Date.now.timeIntervalSince($0) > 24 * 3600 } ?? true
             }
@@ -838,10 +841,10 @@ final class AppModel {
         await repo.enqueue("Pulling…", coalescing: true) { [self] in
             guard let snapshot = repo.snapshot else { return }
             let git = repository(repo)
-            // The fetch normally took the snapshot moments ago: decide from it instead of reading
-            // every worktree's status again. An older one (a fetch that failed to refresh it) is
-            // checked again worktree by worktree.
-            let isFresh = repo.lastRefresh.map { Date.now.timeIntervalSince($0) < 60 } ?? false
+            // The fetch normally took the snapshot just before: decide from it instead of reading
+            // every worktree's status again. An older one (a fetch that failed to refresh it, or an
+            // operation ran in between) is checked again worktree by worktree.
+            let isFresh = repo.snapshotIsCurrent(maxAge: Self.snapshotReuseAge)
             var updated = 0
             var skipped: [String] = []
             // Worktrees the pull left alone; the fetch's snapshot of them is still current.
@@ -892,10 +895,13 @@ final class AppModel {
         }
     }
 
-    /// The current snapshot's worktrees if it was taken within the last minute, for reusing those an
-    /// operation didn't touch; none when it's older, so everything is read again.
+    /// How long after a snapshot is done its worktree status is reused instead of read again.
+    private static let snapshotReuseAge: TimeInterval = 60
+
+    /// The current snapshot's worktrees if it is still current (`RepoState.snapshotIsCurrent`), for
+    /// reusing those an operation didn't touch; none otherwise, so everything is read again.
     private func recentWorktrees(_ repo: RepoState) -> [WorktreeInfo] {
-        guard let last = repo.lastRefresh, Date.now.timeIntervalSince(last) < 60 else { return [] }
+        guard repo.snapshotIsCurrent(maxAge: Self.snapshotReuseAge) else { return [] }
         return repo.snapshot?.worktrees ?? []
     }
 
@@ -1167,7 +1173,10 @@ final class AppModel {
     }
 
     func loadTuning(_ repo: RepoState) async {
-        repo.tuning = await repository(repo).tuning()
+        let tuning = await repository(repo).tuning()
+        // Cancelled reads come back as "not set"; keep the previous (or no) tuning instead.
+        guard !Task.isCancelled else { return }
+        repo.tuning = tuning
     }
 
     /// Lists what turning the tuning settings to `wanted` (default: the suggested ones) changes,
