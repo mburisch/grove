@@ -172,7 +172,7 @@ final class AppModel {
 
     /// A large repo whose git status isn't optimized yet (see `confirmTuning`), unless dismissed.
     func showsTuningHint(_ repo: RepoState) -> Bool {
-        isLarge(repo) && repo.tuning?.isApplied == false && !repo.tuningHintDismissed
+        isLarge(repo) && repo.tuning?.isOptimized == false && !repo.tuningHintDismissed
     }
 
     /// Sends a run to the Git Output page and, once finished, to the debug log.
@@ -1123,31 +1123,41 @@ final class AppModel {
         repo.tuning = await repository(repo).tuning()
     }
 
-    /// Shows the tuning settings' current and new values, then sets them and builds the caches.
-    func confirmTuning(_ repo: RepoState) async {
+    /// Lists what turning the tuning settings to `wanted` (default: the suggested ones) changes,
+    /// with current values, then applies it.
+    func confirmTuning(_ repo: RepoState, wanted: Set<RepoTuning.Option>? = nil) async {
         let tuning = await repository(repo).tuning()
         repo.tuning = tuning
-        guard !tuning.isApplied else { return }
+        let changes = tuning.changes(to: wanted ?? tuning.suggested)
+        guard !changes.isEmpty else { return }
 
         let alert = NSAlert()
-        alert.messageText = "Speed up git status in \(repo.name)?"
-        var lines = tuning.settings.map { setting in
-            let current = setting.current ?? "not set"
-            if setting.needsChange, let proposed = setting.proposed { return "• \(setting.key): \(current) → \(proposed)" }
-            if let note = setting.note { return "• \(setting.key): \(current). \(note)" }
-            return "• \(setting.key): \(current) (already on)"
+        alert.messageText = "Change git settings of \(repo.name)?"
+        var lines = changes.map { change in
+            let current = tuning.setting(change.option)?.current ?? "not set"
+            return "• \(change.turnOn ? "Turn on" : "Turn off") \(change.option.title.lowercased()) "
+                + "(\(change.option.key): \(current) → \(change.turnOn))"
         }
         lines.append("")
-        lines.append("These go in the repository's config (.git/config), so they apply to all its worktrees and to the git "
-                     + "commands you run yourself. Undo one with: git config --unset <name>")
-        if tuning.proposesFSMonitor {
+        lines.append("They go in the repository's config (.git/config), so they apply to all its worktrees and to the git "
+                     + "commands you run yourself.")
+        let turnedOn = changes.filter(\.turnOn).map(\.option)
+        if turnedOn.contains(.fsmonitor) {
             lines.append("")
-            lines.append("The file system monitor keeps one background process per worktree (git fsmonitor--daemon). It "
-                         + "uses some memory, and CPU while many files change. Stop it with: git fsmonitor--daemon stop")
+            lines.append(RepoTuning.Option.fsmonitor.summary)
         }
-        lines.append("")
-        lines.append("Grove then runs git status once in each worktree to build the caches; that takes about as long as "
-                     + "a status does now.")
+        if turnedOn.contains(.manyFiles) {
+            alert.alertStyle = .warning
+            lines.append("")
+            lines.append("Many-files index: other git apps and editor plugins with their own git engine (libgit2, JGit), "
+                         + "and git older than 2.40, may report a corrupt index or fail to show changes. Turning it off "
+                         + "here rewrites the index in the classic format.")
+        }
+        if turnedOn.contains(where: { $0 != .commitGraph }) {
+            lines.append("")
+            lines.append("Grove then runs git status once in each worktree to build the caches; that takes about as long "
+                         + "as a status does now.")
+        }
         alert.informativeText = lines.joined(separator: "\n")
         alert.addButton(withTitle: "Apply")
         alert.addButton(withTitle: "Cancel")
@@ -1155,10 +1165,14 @@ final class AppModel {
         NSApp.activate()
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        await repo.enqueue("Optimizing…") { [self] in
+        await repo.enqueue("Changing git settings…") { [self] in
             do {
-                try await repository(repo).applyTuning(tuning)
-                repo.lastMessage = "Turned on " + tuning.changes.map(\.key).joined(separator: ", ")
+                try await repository(repo).applyTuning(changes)
+                let on = changes.filter(\.turnOn).map { $0.option.title.lowercased() }
+                let off = changes.filter { !$0.turnOn }.map { $0.option.title.lowercased() }
+                repo.lastMessage = [on.isEmpty ? nil : "Turned on " + on.joined(separator: ", "),
+                                    off.isEmpty ? nil : "turned off " + off.joined(separator: ", ")]
+                    .compactMap { $0 }.joined(separator: "; ")
             } catch {
                 repo.fail(error)
             }

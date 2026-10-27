@@ -167,43 +167,61 @@ import Testing
     @Test func tuningPlanRespectsHooksSplitIndexAndSupport() {
         let fresh = RepoTuning.plan(fsmonitor: nil, untrackedCache: nil, manyFiles: nil, splitIndex: nil,
                                     writeCommitGraph: nil, fsmonitorAvailable: true)
-        #expect(fresh.changes.map(\.key) == ["core.fsmonitor", "core.untrackedCache", "feature.manyFiles", "fetch.writeCommitGraph"])
-        #expect(fresh.proposesFSMonitor && !fresh.isApplied)
+        #expect(fresh.enabled.isEmpty && !fresh.isOptimized)
+        // The suggestion leaves out the many-files index, which other git tools may not read.
+        #expect(fresh.suggested == [.fsmonitor, .untrackedCache, .commitGraph])
+        #expect(fresh.changes(to: fresh.suggested).map(\.option) == [.fsmonitor, .untrackedCache, .commitGraph])
 
-        let hook = RepoTuning.plan(fsmonitor: ".git/hooks/query-watchman", untrackedCache: "true", manyFiles: "true",
+        let hook = RepoTuning.plan(fsmonitor: ".git/hooks/query-watchman", untrackedCache: "true", manyFiles: nil,
                                    splitIndex: nil, writeCommitGraph: "true", fsmonitorAvailable: true)
-        #expect(hook.isApplied && hook.settings[0].note != nil)
+        #expect(hook.isOptimized && hook.setting(.fsmonitor)?.isOn == true && hook.setting(.fsmonitor)?.unavailable != nil)
+        #expect(hook.changes(to: []).map(\.option) == [.untrackedCache, .commitGraph])  // The hook stays.
 
         let split = RepoTuning.plan(fsmonitor: "true", untrackedCache: "true", manyFiles: nil, splitIndex: "true",
                                     writeCommitGraph: "true", fsmonitorAvailable: true)
-        #expect(split.isApplied)
-        #expect(split.settings.first { $0.key == "feature.manyFiles" }?.proposed == nil)
+        #expect(split.changes(to: [.fsmonitor, .untrackedCache, .commitGraph, .manyFiles]).isEmpty)
 
         let noDaemon = RepoTuning.plan(fsmonitor: "false", untrackedCache: nil, manyFiles: nil, splitIndex: nil,
                                        writeCommitGraph: "true", fsmonitorAvailable: false)
-        #expect(noDaemon.changes.map(\.key) == ["core.untrackedCache", "feature.manyFiles"])
+        #expect(noDaemon.suggested == [.untrackedCache, .commitGraph])
+
+        // Many files implies the untracked cache.
+        let many = RepoTuning.plan(fsmonitor: nil, untrackedCache: nil, manyFiles: "true", splitIndex: nil,
+                                   writeCommitGraph: nil, fsmonitorAvailable: false)
+        #expect(many.enabled == [.manyFiles, .untrackedCache])
     }
 
-    @Test func applyingTuningSetsConfigAndBuildsUntrackedCache() async throws {
+    @Test func tuningTurnsSettingsOnAndOff() async throws {
         let sb = try await Sandbox()
         defer { sb.cleanup() }
         let repo = try await sb.clone("tune", mode: .full)
-        let current = await repo.tuning()
-        #expect(!current.isApplied)
-        // Without the monitor, so no daemon outlives the test.
-        let plan = RepoTuning.plan(fsmonitor: nil, untrackedCache: nil, manyFiles: nil, splitIndex: nil,
-                                   writeCommitGraph: nil, fsmonitorAvailable: false)
-        try await repo.applyTuning(plan)
+        let indexURL = repo.url.appendingPathComponent(".git/index")
+        func index() throws -> (version: UInt8, untrackedCache: Bool) {
+            let data = try Data(contentsOf: indexURL)
+            return (data[7], data.range(of: Data("UNTR".utf8)) != nil)
+        }
+        func config(_ key: String) async -> String? {
+            await sb.git.outputIfSuccess(["config", "--local", "--get", key], in: repo.url)
+        }
 
-        #expect(await sb.git.outputIfSuccess(["config", "--local", "--get", "core.untrackedCache"], in: repo.url) == "true")
-        #expect(await sb.git.outputIfSuccess(["config", "--local", "--get", "feature.manyFiles"], in: repo.url) == "true")
-        #expect(await sb.git.outputIfSuccess(["config", "--local", "--get", "fetch.writeCommitGraph"], in: repo.url) == "true")
-        let index = try Data(contentsOf: repo.url.appendingPathComponent(".git/index"))
-        #expect(index.range(of: Data("UNTR".utf8)) != nil)  // The status wrote the untracked cache.
+        // Without the monitor, so no daemon outlives the test.
+        let wanted: Set<RepoTuning.Option> = [.untrackedCache, .manyFiles, .commitGraph]
+        try await repo.applyTuning(await repo.tuning().changes(to: wanted))
+        #expect(await config("core.untrackedCache") == "true")
+        #expect(await config("feature.manyFiles") == "true")
+        #expect(await config("fetch.writeCommitGraph") == "true")
+        #expect(try index() == (4, true))  // The status wrote the new format and the untracked cache.
         let graphs = repo.url.appendingPathComponent(".git/objects/info/commit-graphs")
         #expect(!(try FileManager.default.contentsOfDirectory(atPath: graphs.path)).isEmpty)
-        // Only the monitor (left out above) can still be proposed.
-        #expect(await repo.tuning().changes.allSatisfy { $0.key == "core.fsmonitor" })
+        #expect(await repo.tuning().enabled.isSuperset(of: wanted))
+
+        // Off again: the index is back in the classic format, without the cache.
+        try await repo.applyTuning(await repo.tuning().changes(to: [.commitGraph]))
+        #expect(await config("feature.manyFiles") == "false")
+        #expect(await config("core.untrackedCache") == "false")
+        let after = try index()
+        #expect(after.version <= 3 && !after.untrackedCache)
+        #expect(await sb.git.outputIfSuccess(["status", "--porcelain"], in: repo.url) == "")
     }
 
     @Test func snapshotReportsProgressInOrder() async throws {

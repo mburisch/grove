@@ -94,19 +94,10 @@ struct RepoSettingsSection: View {
                               + "the untracked cache is most of its time. They still show in a worktree's file list.")
                 }
             }
-            CardRow("Git status") {
-                HStack(spacing: 8) {
-                    if let tuning = repo.tuning {
-                        Text(tuning.isApplied ? "Optimized" : "Not optimized")
-                            .foregroundStyle(tuning.isApplied || settings.profile == .normal ? Color.primary : .orange)
-                            .help(tuning.settings.map { "\($0.key): \($0.current ?? "not set")" }.joined(separator: "\n"))
-                    } else {
-                        Text("…").foregroundStyle(.secondary)
-                    }
-                    Button("Optimize…") { Task { await model.confirmTuning(repo) } }
-                        .disabled(repo.tuning?.isApplied ?? true)
-                        .help("Turn on git's file system monitor, untracked cache and many-files index for this repository")
-                }
+            if let tuning = repo.tuning {
+                GitTuningRows(repo: repo, tuning: tuning)
+            } else {
+                CardRow("Git performance") { Text("…").foregroundStyle(.secondary) }
             }
             CardRow("Storage") {
                 HStack(spacing: 8) {
@@ -147,7 +138,59 @@ struct RepoSettingsSection: View {
     }
 
     /// Shows the effective value; choosing one stores it as this repository's own setting.
+    /// (Git's own settings are in `GitTuningRows`, applied together after a confirmation.)
     private func binding<Value>(_ value: Value, _ set: @escaping (inout RepoSettings, Value) -> Void) -> Binding<Value> {
         Binding(get: { value }, set: { newValue in model.updateSettings(repo) { set(&$0, newValue) } })
+    }
+}
+
+/// Git's settings for big repositories (`RepoTuning`), one checkbox each. Checking boxes changes
+/// nothing yet; Apply… lists the changes and writes them to the repository's config.
+private struct GitTuningRows: View {
+    @Environment(AppModel.self) private var model
+    let repo: RepoState
+    let tuning: RepoTuning
+    @State private var wanted: Set<RepoTuning.Option> = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("Git performance").foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Button("Suggested") { wanted = tuning.suggested }
+                    .disabled(wanted == tuning.suggested)
+                    .help("Check the settings without compatibility risks")
+                Button("Apply…") { Task { await model.confirmTuning(repo, wanted: wanted) } }
+                    .disabled(tuning.changes(to: wanted).isEmpty)
+            }
+            ForEach(tuning.settings) { setting in
+                VStack(alignment: .leading, spacing: 1) {
+                    Toggle(isOn: binding(setting.option)) {
+                        HStack(spacing: 4) {
+                            Text(setting.option.title)
+                            if !setting.option.isRecommended {
+                                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                            }
+                        }
+                    }
+                    .disabled(setting.unavailable != nil)
+                    Text(setting.unavailable ?? setting.option.summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 20)
+                }
+                .help("\(setting.option.key): \(setting.current ?? "not set")")
+            }
+        }
+        .onAppear { wanted = tuning.enabled }
+        .onChange(of: tuning) { wanted = tuning.enabled }
+    }
+
+    private func binding(_ option: RepoTuning.Option) -> Binding<Bool> {
+        Binding(
+            get: { wanted.contains(option) },
+            set: { on in if on { wanted.insert(option) } else { wanted.remove(option) } }
+        )
     }
 }

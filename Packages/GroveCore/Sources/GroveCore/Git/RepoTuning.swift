@@ -1,72 +1,135 @@
 import Foundation
 
-/// Git settings that make `git status` fast in checkouts with many files: a file system monitor
-/// (so git asks what changed instead of looking at every file), the untracked cache (so it only
-/// re-reads folders that changed), and `feature.manyFiles` (a smaller, faster index format).
-/// Also keeps a commit graph current after each fetch, which speeds up the ahead/behind counts
-/// and merge bases Grove computes (gc would otherwise write it, but large repos fetch without
-/// `gc --auto`; see `FetchOptions.autoGC`). They go in the repository's own config, which its
-/// worktrees share.
+/// Git settings that make git faster in big repositories, each turned on or off on its own. They go
+/// in the repository's own config, which its worktrees share, and also apply to the git commands
+/// the user runs.
 public struct RepoTuning: Sendable, Hashable {
+    public enum Option: String, Sendable, Hashable, CaseIterable, Identifiable {
+        /// A background process per worktree tells git which files changed, so status doesn't
+        /// look at every file.
+        case fsmonitor
+        /// Status re-reads only folders that changed when looking for untracked files.
+        case untrackedCache
+        /// A smaller index format that git reads and writes faster (`index.version=4`, and from
+        /// git 2.40 `index.skipHash`). Tools with their own git engine (libgit2, JGit) and older
+        /// git may not read that index.
+        case manyFiles
+        /// A commit graph kept current after each fetch, which speeds up the ahead/behind counts
+        /// and merge bases Grove computes (gc writes it too, but large repos fetch without
+        /// `gc --auto`; see `FetchOptions.autoGC`).
+        case commitGraph
+
+        public var id: String { rawValue }
+
+        public var key: String {
+            switch self {
+            case .fsmonitor: "core.fsmonitor"
+            case .untrackedCache: "core.untrackedCache"
+            case .manyFiles: "feature.manyFiles"
+            case .commitGraph: "fetch.writeCommitGraph"
+            }
+        }
+
+        public var title: String {
+            switch self {
+            case .fsmonitor: "File system monitor"
+            case .untrackedCache: "Untracked cache"
+            case .manyFiles: "Many-files index"
+            case .commitGraph: "Commit graph after fetch"
+            }
+        }
+
+        public var summary: String {
+            switch self {
+            case .fsmonitor:
+                "A background process per worktree (git fsmonitor--daemon) tells git what changed, so status "
+                    + "doesn't look at every file. Uses some memory, and CPU while many files change."
+            case .untrackedCache:
+                "Status re-reads only folders that changed when looking for untracked files."
+            case .manyFiles:
+                "A faster, smaller index format. Git apps and editor plugins with their own git engine "
+                    + "(libgit2, JGit) and git older than 2.40 may fail to read the repository."
+            case .commitGraph:
+                "Keeps a commit graph current after each fetch, which speeds up ahead/behind counts."
+            }
+        }
+
+        /// Turned on by the suggested optimization: no compatibility risk.
+        public var isRecommended: Bool { self != .manyFiles }
+        /// Keeps its state in the index, which then needs writing now and then (`SnapshotOptions.writeIndexIn`).
+        var usesIndex: Bool { self == .fsmonitor || self == .untrackedCache }
+    }
+
     public struct Setting: Sendable, Hashable, Identifiable {
-        public var key: String
+        public var option: Option
         /// The value git uses now (from any config file), nil when unset.
         public var current: String?
-        /// The value to set; nil leaves the setting alone (see `note`).
-        public var proposed: String?
-        /// Why the setting is left alone, or what to know about it.
-        public var note: String?
+        /// Why it can't be changed here; nil when it can.
+        public var unavailable: String?
 
-        public var id: String { key }
-        public var needsChange: Bool { proposed != nil && !RepoTuning.isTrue(current) }
+        public var id: Option { option }
+        /// On, including a monitor hook (e.g. Watchman) set as `core.fsmonitor`.
+        public var isOn: Bool {
+            RepoTuning.isTrue(current) || (option == .fsmonitor && current.map { !$0.isEmpty && !RepoTuning.isBoolean($0) } == true)
+        }
+    }
+
+    /// One setting to turn on or off.
+    public struct Change: Sendable, Hashable {
+        public var option: Option
+        public var turnOn: Bool
     }
 
     public var settings: [Setting]
-    /// This git can run the built-in file system monitor (`git fsmonitor--daemon`).
-    public var fsmonitorAvailable: Bool
 
-    public var changes: [Setting] { settings.filter(\.needsChange) }
-    /// Every setting that can be changed already has its proposed value.
-    public var isApplied: Bool { changes.isEmpty }
-    public var proposesFSMonitor: Bool { changes.contains { $0.key == "core.fsmonitor" } }
-    /// The file system monitor or the untracked cache is on: both keep their state in the index,
-    /// which then needs writing now and then (`SnapshotOptions.writeIndexIn`).
-    public var usesIndexCaches: Bool {
-        settings.contains { ["core.fsmonitor", "core.untrackedCache"].contains($0.key) && Self.isTrue($0.current) }
-    }
-
-    public init(settings: [Setting], fsmonitorAvailable: Bool) {
+    public init(settings: [Setting]) {
         self.settings = settings
-        self.fsmonitorAvailable = fsmonitorAvailable
     }
 
-    /// What tuning would change, given the current values (nil = unset).
+    public func setting(_ option: Option) -> Setting? { settings.first { $0.option == option } }
+
+    public var enabled: Set<Option> { Set(settings.filter(\.isOn).map(\.option)) }
+
+    /// What's on now plus the recommended options that can be turned on.
+    public var suggested: Set<Option> {
+        enabled.union(settings.filter { $0.option.isRecommended && $0.unavailable == nil }.map(\.option))
+    }
+
+    /// Every recommended option that can be on is on.
+    public var isOptimized: Bool { suggested.isSubset(of: enabled) }
+
+    /// The monitor or the untracked cache is on, so the index holds state that goes stale.
+    public var usesIndexCaches: Bool { settings.contains { $0.option.usesIndex && $0.isOn } }
+
+    /// The changes that take the settings to `wanted`, leaving alone those that can't change.
+    public func changes(to wanted: Set<Option>) -> [Change] {
+        settings.compactMap { setting in
+            let on = wanted.contains(setting.option)
+            guard on != setting.isOn, setting.unavailable == nil else { return nil }
+            return Change(option: setting.option, turnOn: on)
+        }
+    }
+
+    /// The settings and what can be changed, given the current values (nil = unset).
     public static func plan(fsmonitor: String?, untrackedCache: String?, manyFiles: String?, splitIndex: String?,
                             writeCommitGraph: String?, fsmonitorAvailable: Bool) -> RepoTuning {
-        var settings: [Setting] = []
-
-        var monitor = Setting(key: "core.fsmonitor", current: fsmonitor, proposed: "true")
+        var monitor = Setting(option: .fsmonitor, current: fsmonitor)
         if let fsmonitor, !fsmonitor.isEmpty, !isBoolean(fsmonitor) {
-            monitor.proposed = nil
-            monitor.note = "Already uses a hook (\(fsmonitor)); left as it is."
-        } else if !fsmonitorAvailable {
-            monitor.proposed = nil
-            monitor.note = "This git has no built-in file system monitor (git 2.36 or later, built with it)."
+            monitor.unavailable = "Uses a hook (\(fsmonitor)), left as it is."
+        } else if !fsmonitorAvailable && !monitor.isOn {
+            monitor.unavailable = "This git has no built-in file system monitor (git 2.36 or later, built with it)."
         }
-        settings.append(monitor)
-
-        settings.append(Setting(key: "core.untrackedCache", current: untrackedCache, proposed: "true"))
-
-        var many = Setting(key: "feature.manyFiles", current: manyFiles, proposed: "true")
-        if isTrue(splitIndex) && !isTrue(manyFiles) {
-            many.proposed = nil
-            many.note = "Skipped: core.splitIndex is on, and the two together can corrupt the index."
+        var many = Setting(option: .manyFiles, current: manyFiles)
+        if isTrue(splitIndex) && !many.isOn {
+            many.unavailable = "core.splitIndex is on, and the two together can corrupt the index."
         }
-        settings.append(many)
-
-        settings.append(Setting(key: "fetch.writeCommitGraph", current: writeCommitGraph, proposed: "true"))
-
-        return RepoTuning(settings: settings, fsmonitorAvailable: fsmonitorAvailable)
+        return RepoTuning(settings: [
+            monitor,
+            // feature.manyFiles also turns the untracked cache on unless it's set itself.
+            Setting(option: .untrackedCache, current: untrackedCache ?? (isTrue(manyFiles) ? "true" : nil)),
+            many,
+            Setting(option: .commitGraph, current: writeCommitGraph),
+        ])
     }
 
     static func isTrue(_ value: String?) -> Bool {
@@ -80,7 +143,7 @@ public struct RepoTuning: Sendable, Hashable {
 }
 
 extension GitRepository {
-    /// Current values of the tuning settings and what tuning would change.
+    /// Current values of the tuning settings.
     public func tuning() async -> RepoTuning {
         async let fsmonitor = git.outputIfSuccess(["config", "--get", "core.fsmonitor"], in: url)
         async let untrackedCache = git.outputIfSuccess(["config", "--get", "core.untrackedCache"], in: url)
@@ -94,23 +157,45 @@ extension GitRepository {
                                fsmonitorAvailable: available)
     }
 
-    /// Sets the proposed values in the repository's config, writes a commit graph if that is being
-    /// turned on (later fetches keep it current), then runs one status in each worktree that may
-    /// write the index, which stores the untracked cache and the monitor's position and starts the
-    /// monitor. (Grove's other status runs never write the index; see `GitRunner`.)
-    public func applyTuning(_ tuning: RepoTuning) async throws {
-        for setting in tuning.changes {
-            guard let value = setting.proposed else { continue }
-            try await git.run(["config", "--local", setting.key, value], in: url)
+    /// Writes `changes` to the repository's config ("false" to turn one off, which also beats a
+    /// "true" from the global config), then puts each worktree's index in line:
+    /// - Turning the commit graph on writes one now; later fetches keep it current.
+    /// - Turning the many-files index on or off rewrites the index in the new or the classic format
+    ///   (off: so other git tools can read it again right away).
+    /// - Turning the untracked cache off drops it from the index; turning the monitor off stops
+    ///   its background processes.
+    /// - Turning the monitor or untracked cache on runs one status that may write the index, which
+    ///   stores the cache and the monitor's position and starts the monitor. (Grove's other status
+    ///   runs never write the index; see `GitRunner`.)
+    public func applyTuning(_ changes: [RepoTuning.Change]) async throws {
+        for change in changes {
+            try await git.run(["config", "--local", change.option.key, change.turnOn ? "true" : "false"], in: url)
         }
-        if tuning.changes.contains(where: { $0.key == "fetch.writeCommitGraph" }) {
+        let turnedOn = Set(changes.filter(\.turnOn).map(\.option))
+        let turnedOff = Set(changes.filter { !$0.turnOn }.map(\.option))
+        if turnedOn.contains(.commitGraph) {
             try await git.run(["commit-graph", "write", "--reachable", "--split"], in: url, timeout: .seconds(3600))
         }
         let worktrees = GitParsers.parseWorktrees(try await git.output(["worktree", "list", "--porcelain"], in: url))
             .filter { !$0.isBare && !$0.isPrunable && FileManager.default.fileExists(atPath: $0.path) }
         for worktree in worktrees {
-            try await git.run(["status", "--porcelain"], in: URL(fileURLWithPath: worktree.path),
-                              timeout: .seconds(600), optionalLocks: true)
+            let dir = URL(fileURLWithPath: worktree.path)
+            if turnedOff.contains(.fsmonitor) {
+                try await git.run(["fsmonitor--daemon", "stop"], in: dir, check: false)
+            }
+            if turnedOff.contains(.untrackedCache) {
+                try await git.run(["update-index", "--no-untracked-cache"], in: dir)
+            }
+            // index.version only applies to new index files, so convert the existing one either way.
+            if turnedOn.contains(.manyFiles) {
+                try await git.run(["update-index", "--index-version", "4"], in: dir, timeout: .seconds(600))
+            }
+            if turnedOff.contains(.manyFiles) {
+                try await git.run(["update-index", "--index-version", "2"], in: dir, timeout: .seconds(600))
+            }
+            if turnedOn.contains(where: \.usesIndex) {
+                try await git.run(["status", "--porcelain"], in: dir, timeout: .seconds(600), optionalLocks: true)
+            }
         }
     }
 }
