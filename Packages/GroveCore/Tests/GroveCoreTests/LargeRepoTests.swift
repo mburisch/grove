@@ -165,21 +165,22 @@ import Testing
     }
 
     @Test func tuningPlanRespectsHooksSplitIndexAndSupport() {
-        let fresh = RepoTuning.plan(fsmonitor: nil, untrackedCache: nil, manyFiles: nil, splitIndex: nil, fsmonitorAvailable: true)
-        #expect(fresh.changes.map(\.key) == ["core.fsmonitor", "core.untrackedCache", "feature.manyFiles"])
+        let fresh = RepoTuning.plan(fsmonitor: nil, untrackedCache: nil, manyFiles: nil, splitIndex: nil,
+                                    writeCommitGraph: nil, fsmonitorAvailable: true)
+        #expect(fresh.changes.map(\.key) == ["core.fsmonitor", "core.untrackedCache", "feature.manyFiles", "fetch.writeCommitGraph"])
         #expect(fresh.proposesFSMonitor && !fresh.isApplied)
 
         let hook = RepoTuning.plan(fsmonitor: ".git/hooks/query-watchman", untrackedCache: "true", manyFiles: "true",
-                                   splitIndex: nil, fsmonitorAvailable: true)
+                                   splitIndex: nil, writeCommitGraph: "true", fsmonitorAvailable: true)
         #expect(hook.isApplied && hook.settings[0].note != nil)
 
         let split = RepoTuning.plan(fsmonitor: "true", untrackedCache: "true", manyFiles: nil, splitIndex: "true",
-                                    fsmonitorAvailable: true)
+                                    writeCommitGraph: "true", fsmonitorAvailable: true)
         #expect(split.isApplied)
         #expect(split.settings.first { $0.key == "feature.manyFiles" }?.proposed == nil)
 
         let noDaemon = RepoTuning.plan(fsmonitor: "false", untrackedCache: nil, manyFiles: nil, splitIndex: nil,
-                                       fsmonitorAvailable: false)
+                                       writeCommitGraph: "true", fsmonitorAvailable: false)
         #expect(noDaemon.changes.map(\.key) == ["core.untrackedCache", "feature.manyFiles"])
     }
 
@@ -190,13 +191,60 @@ import Testing
         let current = await repo.tuning()
         #expect(!current.isApplied)
         // Without the monitor, so no daemon outlives the test.
-        let plan = RepoTuning.plan(fsmonitor: nil, untrackedCache: nil, manyFiles: nil, splitIndex: nil, fsmonitorAvailable: false)
+        let plan = RepoTuning.plan(fsmonitor: nil, untrackedCache: nil, manyFiles: nil, splitIndex: nil,
+                                   writeCommitGraph: nil, fsmonitorAvailable: false)
         try await repo.applyTuning(plan)
 
         #expect(await sb.git.outputIfSuccess(["config", "--local", "--get", "core.untrackedCache"], in: repo.url) == "true")
         #expect(await sb.git.outputIfSuccess(["config", "--local", "--get", "feature.manyFiles"], in: repo.url) == "true")
+        #expect(await sb.git.outputIfSuccess(["config", "--local", "--get", "fetch.writeCommitGraph"], in: repo.url) == "true")
         let index = try Data(contentsOf: repo.url.appendingPathComponent(".git/index"))
         #expect(index.range(of: Data("UNTR".utf8)) != nil)  // The status wrote the untracked cache.
+        let graphs = repo.url.appendingPathComponent(".git/objects/info/commit-graphs")
+        #expect(!(try FileManager.default.contentsOfDirectory(atPath: graphs.path)).isEmpty)
+        // Only the monitor (left out above) can still be proposed.
+        #expect(await repo.tuning().changes.allSatisfy { $0.key == "core.fsmonitor" })
+    }
+
+    @Test func leanSnapshotSkipsRemoteBranchesUntilAsked() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        for branch in ["a", "b"] { try await sb.publish(1, branch: branch) }
+        let records = RunLog()
+        _ = try await sb.clone("lean-remote", mode: .full)
+        let repo = GitRepository(url: sb.root.appendingPathComponent("lean-remote"),
+                                 git: GitRunner(onRecord: { records.add($0) }))
+        try await sb.git.run(["branch", "--track", "a", "origin/a"], in: repo.url)
+
+        let full = try await repo.snapshot()
+        let lean = try await repo.snapshot(options: .init(remoteBranches: false))
+        #expect(full.remoteBranches.map(\.name).sorted() == ["a", "b", "main"])
+        #expect(lean.remoteBranches.isEmpty && !lean.remoteBranchesListed)
+        // Everything else matches: primary branch, comparisons and tracking come from local refs.
+        #expect(lean.primaryBranch == full.primaryBranch && lean.baseRef == full.baseRef && lean.baseSHA == full.baseSHA)
+        #expect(lean.branches == full.branches)
+        #expect(lean.worktrees == full.worktrees)
+
+        let listed = try await repo.remoteBranches(remote: "origin")
+        #expect(Set(listed.map(\.name)) == ["a", "b", "main"])
+        #expect(listed.allSatisfy { !$0.commit.subject.isEmpty })
+    }
+
+    @Test func fetchCanSkipAutoGCAndPrune() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        let records = RunLog()
+        _ = try await sb.clone("fetchopts", mode: .full)
+        let repo = GitRepository(url: sb.root.appendingPathComponent("fetchopts"), git: GitRunner(onRecord: { records.add($0) }))
+        try await sb.publish(1, branch: "gone")
+        try await repo.fetch()
+        try await sb.git.run(["push", "-q", "origin", ":gone"], in: sb.publisher)
+
+        try await repo.fetch(options: .init(autoGC: false, prune: false))
+        #expect(records.arguments("fetch").last?.contains("--no-auto-gc") == true)
+        #expect(await sb.git.outputIfSuccess(["rev-parse", "--verify", "--quiet", "origin/gone"], in: repo.url) != nil)
+        try await repo.fetch()
+        #expect(await sb.git.outputIfSuccess(["rev-parse", "--verify", "--quiet", "origin/gone"], in: repo.url) == nil)
     }
 
     @Test func statusCanSkipUntrackedFiles() async throws {
@@ -284,4 +332,5 @@ private final class RunLog: @unchecked Sendable {
     func reset() { lock.withLock { started = [] } }
     func count(_ command: String) -> Int { lock.withLock { started.filter { $0.arguments.first == command }.count } }
     var total: Int { lock.withLock { started.count } }
+    func arguments(_ command: String) -> [[String]] { lock.withLock { started.filter { $0.arguments.first == command }.map(\.arguments) } }
 }

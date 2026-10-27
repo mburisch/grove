@@ -220,6 +220,9 @@ public struct RepoSnapshot: Sendable, Hashable {
     public var worktrees: [WorktreeInfo]
     public var branches: [BranchInfo]
     public var remoteBranches: [RemoteBranchInfo]
+    /// False when the snapshot skipped the remote branches (`SnapshotOptions.remoteBranches`);
+    /// `remoteBranches` is then empty and `GitRepository.remoteBranches(remote:)` lists them.
+    public var remoteBranchesListed = true
     public var lastFetchDate: Date?
 
     public var mainWorktree: WorktreeInfo? { worktrees.first(where: \.isMain) ?? worktrees.first }

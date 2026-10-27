@@ -133,7 +133,10 @@ private struct RepoInspector: View {
     private func branchSections(_ snapshot: RepoSnapshot) -> some View {
         let localNames = Set(snapshot.branches.map(\.name))
         let freeBranches = snapshot.branches.filter { $0.worktreePath == nil }
-        let remoteOnly = snapshot.remoteBranches.filter { !localNames.contains($0.name) }
+        // Large repos' snapshots leave remote branches out; they're read when the section is opened.
+        let remoteList = snapshot.remoteBranchesListed ? snapshot.remoteBranches : repo.remoteBranchList
+        let remoteOnly = remoteList?.filter { !localNames.contains($0.name) }
+        let showsRemoteSection = snapshot.remoteBranchesListed ? remoteOnly?.isEmpty == false : snapshot.remoteName != nil
 
         if !freeBranches.isEmpty {
             Divider()
@@ -142,20 +145,25 @@ private struct RepoInspector: View {
                 BranchRow(repo: repo, branch: branch, isPrimary: branch.name == snapshot.primaryBranch)
             }
         }
-        if !remoteOnly.isEmpty {
+        if showsRemoteSection {
             Divider()
             Button {
                 withAnimation { showRemoteBranches.toggle() }
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: showRemoteBranches ? "chevron.down" : "chevron.right").font(.caption)
-                    SectionTitle("Remote Branches", count: remoteOnly.count)
+                    SectionTitle("Remote Branches", count: remoteOnly?.count)
                 }
             }
             .buttonStyle(.plain)
             if showRemoteBranches {
-                ForEach(remoteOnly) { branch in
-                    RemoteBranchRow(repo: repo, branch: branch)
+                if let remoteOnly {
+                    ForEach(remoteOnly) { branch in
+                        RemoteBranchRow(repo: repo, branch: branch)
+                    }
+                } else {
+                    ProgressView().controlSize(.small)
+                        .task(id: repo.path) { await model.loadRemoteBranches(repo) }
                 }
             }
         }

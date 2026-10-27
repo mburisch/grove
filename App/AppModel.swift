@@ -712,13 +712,22 @@ final class AppModel {
         }
     }
 
-    func fetch(_ repo: RepoState) async {
+    /// `background`: a scheduled fetch. In a large repository it skips `gc --auto` (no surprise
+    /// repack of gigabytes; Clean Up does that) and prunes deleted remote branches at most daily.
+    func fetch(_ repo: RepoState, background: Bool = false) async {
         await repo.enqueue("Fetching…", coalescing: true) { [self] in
             repo.lastFetchAttempt = .now
+            var options = settings(for: repo).fetchOptions
+            if background && isLarge(repo) {
+                options.autoGC = false
+                options.prune = repo.lastPrune.map { Date.now.timeIntervalSince($0) > 24 * 3600 } ?? true
+            }
             do {
-                try await repository(repo).fetch(remote: repo.snapshot?.remoteName, options: settings(for: repo).fetchOptions)
+                try await repository(repo).fetch(remote: repo.snapshot?.remoteName, options: options)
                 repo.lastError = nil
                 repo.consecutiveFailures = 0
+                if options.prune { repo.lastPrune = .now }
+                repo.remoteBranchList = nil
             } catch {
                 repo.fail(error)
                 repo.consecutiveFailures += 1
@@ -1065,6 +1074,18 @@ final class AppModel {
         }
     }
 
+    /// Lists the remote branches a snapshot left out; kept until the next fetch.
+    func loadRemoteBranches(_ repo: RepoState) async {
+        guard repo.remoteBranchList == nil, let remote = repo.snapshot?.remoteName else { return }
+        do {
+            repo.remoteBranchList = try await timed(repo, "remoteBranches") {
+                try await repository(repo).remoteBranches(remote: remote)
+            }
+        } catch {
+            repo.fail(error)
+        }
+    }
+
     func loadTuning(_ repo: RepoState) async {
         repo.tuning = await repository(repo).tuning()
     }
@@ -1244,7 +1265,7 @@ final class AppModel {
             guard let last = repo.lastFetch else { return true }
             return now.timeIntervalSince(last) >= Double(minutes) * 60 * backoff
         }
-        await runLimited(due, queuedLabel: "Waiting to fetch") { await self.fetch($0) }
+        await runLimited(due, queuedLabel: "Waiting to fetch") { await self.fetch($0, background: true) }
     }
 
     private func startNetworkMonitor() {

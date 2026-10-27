@@ -28,13 +28,18 @@ public struct GitRepository: Sendable {
         /// Count untracked files in each worktree's status. Off, status skips the search for them,
         /// which in a big checkout without the untracked cache is most of its time.
         public var untrackedFiles = true
+        /// List every remote-tracking branch. Off, a snapshot reads only the primary remote branch,
+        /// which on a remote with many thousands of branches saves reading and parsing megabytes of
+        /// refs on every refresh; `remoteBranches()` lists them on demand.
+        public var remoteBranches = true
 
         public init(compareAllBranches: Bool = true, lineCounts: Bool = true, maxComparisons: Int = 40,
-                    untrackedFiles: Bool = true) {
+                    untrackedFiles: Bool = true, remoteBranches: Bool = true) {
             self.compareAllBranches = compareAllBranches
             self.lineCounts = lineCounts
             self.maxComparisons = maxComparisons
             self.untrackedFiles = untrackedFiles
+            self.remoteBranches = remoteBranches
         }
     }
 
@@ -47,12 +52,17 @@ public struct GitRepository: Sendable {
             await git.outputIfSuccess(["remote", "get-url", remoteName], in: url)
         } else { nil }
 
+        let remoteRefs = "refs/remotes/\(remoteName ?? "origin")"
+        let remoteHead = await remoteHeadBranch(remote: remoteName)
+        // Without the full list, just the primary branch (or the usual candidates for it).
+        let remotePatterns = options.remoteBranches ? [remoteRefs]
+            : (remoteHead.map { [$0] } ?? Self.primaryCandidates).map { "\(remoteRefs)/\($0)" }
         let refsOutput = try await git.output(
-            ["for-each-ref", "--format=\(GitParsers.refFormat)", "refs/heads", "refs/remotes/\(remoteName ?? "origin")"],
+            ["for-each-ref", "--format=\(GitParsers.refFormat)", "refs/heads"] + remotePatterns,
             in: url
         )
         let refs = GitParsers.parseRefs(refsOutput)
-        let primary = await primaryBranch(remote: remoteName, refs: refs)
+        let primary = remoteHead ?? primaryBranch(remote: remoteName, refs: refs)
         let mode = await checkoutMode(remote: remoteName)
         let primaryRef = remoteName.flatMap { r in primary.map { "\(r)/\($0)" } }
         let hasPrimaryRef = primaryRef.map { p in refs.contains { $0.refname == "refs/remotes/\(p)" } } ?? false
@@ -95,8 +105,8 @@ public struct GitRepository: Sendable {
                 worktreePath: ref.worktreePath
             )
         }
-        // Remote branches (excluding the symbolic HEAD).
-        var remoteBranches = refs.filter { $0.refname.hasPrefix(remotePrefix) && !$0.isSymref }.map { ref in
+        // Remote branches (excluding the symbolic HEAD), unless only the primary one was read.
+        var remoteBranches = !options.remoteBranches ? [] : refs.filter { $0.refname.hasPrefix(remotePrefix) && !$0.isSymref }.map { ref in
             RemoteBranchInfo(
                 name: String(ref.refname.dropFirst(remotePrefix.count)),
                 remote: remoteName ?? "origin",
@@ -156,8 +166,25 @@ public struct GitRepository: Sendable {
             worktrees: worktrees,
             branches: branches,
             remoteBranches: remoteBranches,
+            remoteBranchesListed: options.remoteBranches,
             lastFetchDate: await lastFetchDate()
         )
+    }
+
+    /// Every remote-tracking branch of `remote`, newest commit first, for when a snapshot left them
+    /// out (`SnapshotOptions.remoteBranches`). Reads only what the list shows.
+    public func remoteBranches(remote: String) async throws -> [RemoteBranchInfo] {
+        let prefix = "refs/remotes/\(remote)/"
+        let format = ["%(refname)", "%(objectname)", "%(subject)", "%(authorname)", "%(committerdate:unix)", "%(symref)"]
+            .joined(separator: "%00")
+        let output = try await git.output(["for-each-ref", "--format=\(format)", "--sort=-committerdate", prefix], in: url,
+                                          timeout: .seconds(120))
+        return output.split(separator: "\n").compactMap { line in
+            let f = line.split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
+            guard f.count == 6, f[5].isEmpty, f[0].hasPrefix(prefix) else { return nil }
+            let commit = CommitSummary(sha: f[1], subject: f[2], author: f[3], date: Date(timeIntervalSince1970: TimeInterval(f[4]) ?? 0))
+            return RemoteBranchInfo(name: String(f[0].dropFirst(prefix.count)), remote: remote, commit: commit, versusPrimary: nil)
+        }
     }
 
     private func primaryRemoteName() async throws -> String? {
@@ -165,14 +192,20 @@ public struct GitRepository: Sendable {
         return remotes.contains("origin") ? "origin" : remotes.first
     }
 
-    private func primaryBranch(remote: String?, refs: [GitParsers.RefRecord]) async -> String? {
-        if let remote,
-           let head = await git.outputIfSuccess(["symbolic-ref", "--short", "refs/remotes/\(remote)/HEAD"], in: url),
-           head.hasPrefix("\(remote)/") {
-            return String(head.dropFirst(remote.count + 1))
-        }
+    private static let primaryCandidates = ["main", "master", "trunk", "develop"]
+
+    /// The branch `<remote>/HEAD` points to, if it is set.
+    private func remoteHeadBranch(remote: String?) async -> String? {
+        guard let remote,
+              let head = await git.outputIfSuccess(["symbolic-ref", "--short", "refs/remotes/\(remote)/HEAD"], in: url),
+              head.hasPrefix("\(remote)/") else { return nil }
+        return String(head.dropFirst(remote.count + 1))
+    }
+
+    /// The primary branch when `<remote>/HEAD` isn't set, guessed from `refs`.
+    private func primaryBranch(remote: String?, refs: [GitParsers.RefRecord]) -> String? {
         let names = Set(refs.map(\.refname))
-        for candidate in ["main", "master", "trunk", "develop"] {
+        for candidate in Self.primaryCandidates {
             if names.contains("refs/remotes/\(remote ?? "origin")/\(candidate)") { return candidate }
         }
         // Single-branch clones may have exactly one remote-tracking branch.
@@ -181,7 +214,7 @@ public struct GitRepository: Sendable {
             return String(only)
         }
         // No usable remote: fall back to a conventional local branch.
-        for candidate in ["main", "master", "trunk", "develop"] where names.contains("refs/heads/\(candidate)") {
+        for candidate in Self.primaryCandidates where names.contains("refs/heads/\(candidate)") {
             return candidate
         }
         return nil
@@ -396,10 +429,18 @@ public struct GitRepository: Sendable {
         public var scope: FetchScope
         /// Download tags pointing into fetched history (git's default). False passes `--no-tags`.
         public var tags: Bool
+        /// Let git run `gc --auto` after the fetch (its default). False passes `--no-auto-gc`, so a
+        /// background fetch never starts repacking gigabytes; Clean Up does that when asked.
+        public var autoGC: Bool
+        /// Delete remote-tracking branches that are gone from the remote (`--prune`, all-branches
+        /// fetches only; narrow fetches always drop those of local branches' upstreams).
+        public var prune: Bool
 
-        public init(scope: FetchScope = .all, tags: Bool = true) {
+        public init(scope: FetchScope = .all, tags: Bool = true, autoGC: Bool = true, prune: Bool = true) {
             self.scope = scope
             self.tags = tags
+            self.autoGC = autoGC
+            self.prune = prune
         }
     }
 
@@ -413,13 +454,15 @@ public struct GitRepository: Sendable {
         if await git.outputIfSuccess(["symbolic-ref", "refs/remotes/\(remote)/HEAD"], in: url) == nil {
             _ = try? await git.run(["remote", "set-head", remote, "--auto"], in: url, timeout: .seconds(60))
         }
-        let tags = options.tags ? [] : ["--no-tags"]
+        let flags = (options.tags ? [] : ["--no-tags"]) + (options.autoGC ? [] : ["--no-auto-gc"])
         if options.scope == .primaryAndLocal, let refspecs = try await narrowFetchRefspecs(remote: remote) {
             guard !refspecs.isEmpty else { return }
-            try await git.run(["fetch", "--no-progress", "--stdin"] + tags + [remote], in: url, timeout: .seconds(600),
+            try await git.run(["fetch", "--no-progress", "--stdin"] + flags + [remote], in: url, timeout: .seconds(600),
                               input: Data(refspecs.joined(separator: "\n").utf8))
         } else {
-            try await git.run(["fetch", "--prune", "--no-progress"] + tags + [remote], in: url, timeout: .seconds(600))
+            // Explicit both ways: `fetch.prune` in the user's config would otherwise prune anyway.
+            let prune = options.prune ? ["--prune"] : ["--no-prune"]
+            try await git.run(["fetch"] + prune + ["--no-progress"] + flags + [remote], in: url, timeout: .seconds(600))
         }
     }
 

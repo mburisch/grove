@@ -198,7 +198,7 @@ public struct GitRunner: Sendable {
         let words = arguments.filter { !$0.hasPrefix("-") }
         switch words.first ?? "" {
         case "fetch", "pull", "clone", "merge", "reset", "checkout", "gc", "repack", "prune",
-             "pack-objects", "maintenance":
+             "pack-objects", "maintenance", "commit-graph":
             return true
         case "worktree":
             return words.dropFirst().first == "add"

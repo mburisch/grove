@@ -107,7 +107,9 @@ public struct EffectiveRepoSettings: Sendable, Hashable {
 
     public var fetchOptions: GitRepository.FetchOptions { .init(scope: fetchScope, tags: fetchTags) }
     public var snapshotOptions: GitRepository.SnapshotOptions {
-        .init(compareAllBranches: compareAllBranches, lineCounts: lineCounts, untrackedFiles: countUntracked)
+        // Large repositories list remote branches only when asked (see `SnapshotOptions.remoteBranches`).
+        .init(compareAllBranches: compareAllBranches, lineCounts: lineCounts, untrackedFiles: countUntracked,
+              remoteBranches: profile == .normal)
     }
 }
 

@@ -3,7 +3,10 @@ import Foundation
 /// Git settings that make `git status` fast in checkouts with many files: a file system monitor
 /// (so git asks what changed instead of looking at every file), the untracked cache (so it only
 /// re-reads folders that changed), and `feature.manyFiles` (a smaller, faster index format).
-/// They go in the repository's own config, which its worktrees share.
+/// Also keeps a commit graph current after each fetch, which speeds up the ahead/behind counts
+/// and merge bases Grove computes (gc would otherwise write it, but large repos fetch without
+/// `gc --auto`; see `FetchOptions.autoGC`). They go in the repository's own config, which its
+/// worktrees share.
 public struct RepoTuning: Sendable, Hashable {
     public struct Setting: Sendable, Hashable, Identifiable {
         public var key: String
@@ -34,7 +37,7 @@ public struct RepoTuning: Sendable, Hashable {
 
     /// What tuning would change, given the current values (nil = unset).
     public static func plan(fsmonitor: String?, untrackedCache: String?, manyFiles: String?, splitIndex: String?,
-                            fsmonitorAvailable: Bool) -> RepoTuning {
+                            writeCommitGraph: String?, fsmonitorAvailable: Bool) -> RepoTuning {
         var settings: [Setting] = []
 
         var monitor = Setting(key: "core.fsmonitor", current: fsmonitor, proposed: "true")
@@ -56,6 +59,8 @@ public struct RepoTuning: Sendable, Hashable {
         }
         settings.append(many)
 
+        settings.append(Setting(key: "fetch.writeCommitGraph", current: writeCommitGraph, proposed: "true"))
+
         return RepoTuning(settings: settings, fsmonitorAvailable: fsmonitorAvailable)
     }
 
@@ -76,19 +81,25 @@ extension GitRepository {
         async let untrackedCache = git.outputIfSuccess(["config", "--get", "core.untrackedCache"], in: url)
         async let manyFiles = git.outputIfSuccess(["config", "--get", "feature.manyFiles"], in: url)
         async let splitIndex = git.outputIfSuccess(["config", "--get", "core.splitIndex"], in: url)
+        async let writeCommitGraph = git.outputIfSuccess(["config", "--get", "fetch.writeCommitGraph"], in: url)
         async let options = git.outputIfSuccess(["version", "--build-options"], in: url)
         let available = (await options ?? "").split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces) == "feature: fsmonitor--daemon" }
         return RepoTuning.plan(fsmonitor: await fsmonitor, untrackedCache: await untrackedCache, manyFiles: await manyFiles,
-                               splitIndex: await splitIndex, fsmonitorAvailable: available)
+                               splitIndex: await splitIndex, writeCommitGraph: await writeCommitGraph,
+                               fsmonitorAvailable: available)
     }
 
-    /// Sets the proposed values in the repository's config, then runs one status in each worktree
-    /// that may write the index, which stores the untracked cache and the monitor's position and
-    /// starts the monitor. (Grove's other status runs never write the index; see `GitRunner`.)
+    /// Sets the proposed values in the repository's config, writes a commit graph if that is being
+    /// turned on (later fetches keep it current), then runs one status in each worktree that may
+    /// write the index, which stores the untracked cache and the monitor's position and starts the
+    /// monitor. (Grove's other status runs never write the index; see `GitRunner`.)
     public func applyTuning(_ tuning: RepoTuning) async throws {
         for setting in tuning.changes {
             guard let value = setting.proposed else { continue }
             try await git.run(["config", "--local", setting.key, value], in: url)
+        }
+        if tuning.changes.contains(where: { $0.key == "fetch.writeCommitGraph" }) {
+            try await git.run(["commit-graph", "write", "--reachable", "--split"], in: url, timeout: .seconds(3600))
         }
         let worktrees = GitParsers.parseWorktrees(try await git.output(["worktree", "list", "--porcelain"], in: url))
             .filter { !$0.isBare && !$0.isPrunable && FileManager.default.fileExists(atPath: $0.path) }

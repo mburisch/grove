@@ -41,6 +41,12 @@ final class RepoState: Identifiable {
     var prefetch: PrefetchStatus?
     /// Git settings for big checkouts and whether they're on; read when the settings are shown.
     var tuning: RepoTuning?
+    /// Remote branches read on demand when snapshots skip them (large repositories); nil until
+    /// shown, and again after each fetch.
+    var remoteBranchList: [RemoteBranchInfo]?
+    /// Last fetch that pruned deleted remote branches; background fetches of large repositories
+    /// prune at most daily.
+    var lastPrune: Date?
     /// The user dismissed the clean-up suggestion (until the app restarts or the repo is cleaned up).
     var storageWarningDismissed = false
 
