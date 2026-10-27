@@ -224,6 +224,56 @@ import Testing
         #expect(await sb.git.outputIfSuccess(["status", "--porcelain"], in: repo.url) == "")
     }
 
+    @Test func snapshotReusesUnchangedWorktrees() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        let records = RunLog()
+        _ = try await sb.clone("reuse", mode: .full)
+        let repo = GitRepository(url: sb.root.appendingPathComponent("reuse"), git: GitRunner(onRecord: { records.add($0) }))
+        let linked = sb.root.appendingPathComponent("reuse-linked")
+        try await repo.addWorktree(branch: "origin/main", at: linked)
+        let cache = ComparisonCache()
+        let first = try await repo.snapshot(cache: cache)
+
+        // Reused: no status for either worktree, same result.
+        var options = GitRepository.SnapshotOptions()
+        options.reuseWorktrees = Dictionary(uniqueKeysWithValues: first.worktrees.map { ($0.path, $0) })
+        records.reset()
+        let reused = try await repo.snapshot(options: options, cache: cache)
+        #expect(records.count("status") == 0)
+        #expect(reused.worktrees == first.worktrees)
+
+        // A worktree whose HEAD moved is read again even when offered for reuse.
+        try await sb.commit(in: linked, file: "moved.txt", content: "m")
+        records.reset()
+        let afterMove = try await repo.snapshot(options: options, cache: cache)
+        #expect(records.count("status") == 1)
+        let movedInfo = try #require(afterMove.worktrees.first { $0.path == linked.path })
+        #expect(movedInfo.head != first.worktrees.first { $0.path == linked.path }?.head)
+        #expect(movedInfo.versusPrimary == AheadBehind(ahead: 1, behind: 0))
+    }
+
+    @Test func snapshotStoreRoundTrips() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        let repo = try await sb.clone("stored", mode: .full)
+        let snap = try await repo.snapshot()
+        let store = SnapshotStore(directory: sb.root.appendingPathComponent("snapshots"))
+        #expect(store.load(for: repo.url.path) == nil)
+
+        let taken = Date(timeIntervalSince1970: 1_800_000_000)
+        try store.save(snap, for: repo.url.path, at: taken)
+        let loaded = try #require(store.load(for: repo.url.path))
+        #expect(loaded.snapshot == snap && loaded.saved == taken)
+        #expect(store.load(for: repo.url.path + "-other") == nil)
+
+        // Unreadable files are ignored.
+        try Data("{".utf8).write(to: store.fileURL(for: repo.url.path))
+        #expect(store.load(for: repo.url.path) == nil)
+        store.remove(for: repo.url.path)
+        #expect(!FileManager.default.fileExists(atPath: store.fileURL(for: repo.url.path).path))
+    }
+
     @Test func snapshotReportsProgressInOrder() async throws {
         let sb = try await Sandbox()
         defer { sb.cleanup() }

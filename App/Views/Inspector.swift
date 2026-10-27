@@ -77,6 +77,11 @@ private struct RepoInspector: View {
                     }
                 }
                 PathLine(path: repo.path, display: repo.displayPath)
+                if let saved = repo.snapshotSaved {
+                    Label("Showing what Grove saw \(saved.relative)", systemImage: "clock.arrow.circlepath")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 HStack(spacing: 5) {
                     if let gh = repo.snapshot?.gitHub {
                         Button(gh.slug) { NSWorkspace.shared.open(gh.webURL) }.buttonStyle(.link)

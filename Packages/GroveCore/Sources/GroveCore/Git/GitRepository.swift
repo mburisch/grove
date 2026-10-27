@@ -36,6 +36,10 @@ public struct GitRepository: Sendable {
         /// so the untracked cache and file system monitor position it stores go stale unless
         /// something else rewrites the index; letting status write it now and then keeps them fresh.
         public var writeIndexIn: Set<String> = []
+        /// Worktrees as an earlier snapshot read them, by path, to keep instead of reading their
+        /// status again: after a pull, those it didn't move. Used only while the worktree's HEAD
+        /// and branch are still the same.
+        public var reuseWorktrees: [String: WorktreeInfo] = [:]
 
         public init(compareAllBranches: Bool = true, lineCounts: Bool = true, maxComparisons: Int = 40,
                     untrackedFiles: Bool = true, remoteBranches: Bool = true) {
@@ -96,6 +100,22 @@ public struct GitRepository: Sendable {
         await progress?(SnapshotProgress(step: "status 0/\(worktreeRecords.count)", pendingWorktrees: pending))
         let worktrees = try await withThrowingTaskGroup(of: (Int, WorktreeInfo).self) { group in
             for (index, record) in worktreeRecords.enumerated() {
+                if let earlier = options.reuseWorktrees[record.path], earlier.head == record.head,
+                   earlier.branch == record.branch, earlier.isPrunable == record.isPrunable {
+                    var info = earlier
+                    info.isMain = index == 0
+                    info.isLocked = record.isLocked
+                    group.addTask {
+                        // Usually from the cache; recomputed if the primary branch moved since.
+                        if let target, !record.head.isEmpty {
+                            let versus = await comparison(of: record.head, to: target, diff: options.lineCounts, cache: cache)
+                            info.versusPrimary = versus.count
+                            info.committedDiff = versus.diff ?? .zero
+                        }
+                        return (index, info)
+                    }
+                    continue
+                }
                 group.addTask {
                     (index, await worktreeInfo(record, isMain: index == 0, compareTo: target,
                                                lineCounts: options.lineCounts, untrackedFiles: options.untrackedFiles,

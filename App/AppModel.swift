@@ -92,6 +92,10 @@ final class AppModel {
     private(set) var currentDiff: FileDiff?
 
     @ObservationIgnored private let store = ConfigStore()
+    /// Each repo's last snapshot, shown after launch until the first refresh is done.
+    @ObservationIgnored private let snapshotStore = SnapshotStore()
+    /// Writes snapshots one at a time, so an older one never lands after a newer one.
+    @ObservationIgnored private let snapshotWrites = DispatchQueue(label: "grove.snapshots", qos: .utility)
     @ObservationIgnored private var scheduler: Task<Void, Never>?
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     @ObservationIgnored private var started = false
@@ -381,6 +385,18 @@ final class AppModel {
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         let added = newRepos.filter { existing[$0.path] == nil }
         for repo in added { repo.debugLog = debugLog }
+        // Show what was seen last time while the first refresh runs; in a big repo it takes a while.
+        let store = snapshotStore
+        let addedPaths = added.map(\.path)
+        let saved = await Task.detached(priority: .userInitiated) {
+            addedPaths.compactMap { path in store.load(for: path).map { (path, $0) } }
+        }.value
+        for (path, entry) in saved {
+            guard let repo = added.first(where: { $0.path == path }), repo.snapshot == nil else { continue }
+            repo.snapshot = entry.snapshot
+            repo.snapshotSaved = entry.saved
+            repo.refreshingWorktrees = Set(entry.snapshot.worktrees.map(\.path))
+        }
         repos = newRepos
         debugLog?.log("repositories", ["paths": newRepos.map(\.path), "scanSeconds": lastScan.timeIntervalSince(scanStart)])
         switch pane {
@@ -413,6 +429,9 @@ final class AppModel {
         if isScanned, !config.excluded.contains(repo.path) { config.excluded.append(repo.path) }
         config.repoSettings[repo.path] = nil
         config.forgetOrdering(of: repo.path)
+        let store = snapshotStore
+        let path = repo.path
+        snapshotWrites.async { store.remove(for: path) }
         await rebuildRepoList()
     }
 
@@ -431,7 +450,9 @@ final class AppModel {
         }
     }
 
-    private func loadSnapshot(_ repo: RepoState) async {
+    /// `reusing`: worktrees from the current snapshot that can't have changed since (a pull didn't
+    /// move them); they keep that status instead of having it read again.
+    private func loadSnapshot(_ repo: RepoState, reusing: [WorktreeInfo] = []) async {
         // The size picks the profile, so read it before the first (possibly expensive) snapshot.
         if repo.storage == nil { await loadStorage(repo) }
         if repo.tuning == nil { await loadTuning(repo) }
@@ -439,7 +460,12 @@ final class AppModel {
             let cachedComparisons = await repo.comparisons.count
             let started = Date.now
             var options = settings(for: repo).snapshotOptions
-            options.writeIndexIn = indexWritesDue(repo)
+            options.reuseWorktrees = Dictionary(reusing.map { ($0.path, $0) }) { first, _ in first }
+            // A reused worktree runs no status, so it can't write its index this time.
+            options.writeIndexIn = indexWritesDue(repo).subtracting(options.reuseWorktrees.keys)
+            if !reusing.isEmpty {
+                debugLog?.log("step", ["repo": repo.path, "step": "snapshot reuses worktrees", "worktrees": reusing.map(\.path).sorted()])
+            }
             if !options.writeIndexIn.isEmpty {
                 debugLog?.log("step", ["repo": repo.path, "step": "status writes index", "worktrees": options.writeIndexIn.sorted()])
             }
@@ -456,6 +482,8 @@ final class AppModel {
             }
             for path in options.writeIndexIn { repo.indexWrittenAt[path] = started }
             repo.snapshot = snapshot
+            repo.snapshotSaved = nil
+            saveSnapshot(snapshot, of: repo)
             // When it started: changes made while it ran may be missing from it.
             repo.lastRefresh = started
             logShape(repo, snapshot, cachedComparisons: cachedComparisons)
@@ -497,6 +525,12 @@ final class AppModel {
         } catch {
             repo.fail(error)
         }
+    }
+
+    private func saveSnapshot(_ snapshot: RepoSnapshot, of repo: RepoState) {
+        let store = snapshotStore
+        let path = repo.path
+        snapshotWrites.async { try? store.save(snapshot, for: path) }
     }
 
     /// Worktrees whose status may write the index in the next snapshot: in a repo with the file
@@ -809,6 +843,8 @@ final class AppModel {
             let isFresh = repo.lastRefresh.map { Date.now.timeIntervalSince($0) < 60 } ?? false
             var updated = 0
             var skipped: [String] = []
+            // Worktrees the pull left alone; the fetch's snapshot of them is still current.
+            var unchanged: [WorktreeInfo] = []
             let worktrees = snapshot.worktrees.filter { !$0.isPrunable }
             for (index, wt) in worktrees.enumerated() {
                 repo.activityStep = "fast-forward \(index + 1)/\(worktrees.count)"
@@ -816,8 +852,9 @@ final class AppModel {
                     let outcome = isFresh ? try await git.fastForward(worktree: wt) : try await git.fastForward(worktree: wt.path)
                     switch outcome {
                     case .updated: updated += 1
-                    case .upToDate: break
+                    case .upToDate: if isFresh { unchanged.append(wt) }
                     case .skipped(let reason):
+                        if isFresh { unchanged.append(wt) }
                         if (wt.tracking?.behind ?? 0) > 0 { skipped.append("\(wt.branch ?? "HEAD"): \(reason)") }
                     }
                 } catch {
@@ -828,8 +865,9 @@ final class AppModel {
                 if case .updated = try? await git.fastForward(branch: branch) { updated += 1 }
             }
             repo.lastMessage = Self.pullSummary(updated: updated, skipped: skipped)
-            // When nothing moved, the fetch's snapshot is still current.
-            if updated > 0 { await loadSnapshot(repo) }
+            // When nothing moved, the fetch's snapshot is still current; otherwise only what moved
+            // (and the refs) is read again.
+            if updated > 0 { await loadSnapshot(repo, reusing: unchanged) }
         }
     }
 
@@ -849,8 +887,15 @@ final class AppModel {
             } catch {
                 repo.fail(error)
             }
-            await loadSnapshot(repo)
+            await loadSnapshot(repo, reusing: recentWorktrees(repo).filter { $0.path != worktree.path })
         }
+    }
+
+    /// The current snapshot's worktrees if it was taken within the last minute, for reusing those an
+    /// operation didn't touch; none when it's older, so everything is read again.
+    private func recentWorktrees(_ repo: RepoState) -> [WorktreeInfo] {
+        guard let last = repo.lastRefresh, Date.now.timeIntervalSince(last) < 60 else { return [] }
+        return repo.snapshot?.worktrees ?? []
     }
 
     func fastForward(_ repo: RepoState, branch: BranchInfo) async {
@@ -862,7 +907,8 @@ final class AppModel {
             } catch {
                 repo.fail(error)
             }
-            await loadSnapshot(repo)
+            // Only a branch without a worktree moved.
+            await loadSnapshot(repo, reusing: recentWorktrees(repo))
         }
     }
 

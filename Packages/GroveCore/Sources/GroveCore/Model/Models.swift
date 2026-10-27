@@ -33,7 +33,7 @@ public struct AheadBehind: Sendable, Hashable, Codable {
     public var isZero: Bool { ahead == 0 && behind == 0 }
 }
 
-public struct DiffStat: Sendable, Hashable {
+public struct DiffStat: Sendable, Hashable, Codable {
     public var files: Int
     public var insertions: Int
     public var deletions: Int
@@ -48,7 +48,7 @@ public struct DiffStat: Sendable, Hashable {
     public var isZero: Bool { files == 0 }
 }
 
-public struct WorkingTreeStatus: Sendable, Hashable {
+public struct WorkingTreeStatus: Sendable, Hashable, Codable {
     public var staged: Int = 0
     public var unstaged: Int = 0
     public var untracked: Int = 0
@@ -69,14 +69,14 @@ public struct WorkingTreeStatus: Sendable, Hashable {
     public var isClean: Bool { !hasTrackedChanges && untrackedCounted && untracked == 0 }
 }
 
-public struct CommitSummary: Sendable, Hashable {
+public struct CommitSummary: Sendable, Hashable, Codable {
     public var sha: String
     public var subject: String
     public var author: String
     public var date: Date
 }
 
-public struct BranchInfo: Sendable, Hashable, Identifiable {
+public struct BranchInfo: Sendable, Hashable, Identifiable, Codable {
     public var name: String
     public var commit: CommitSummary
     /// Upstream ref short name, e.g. `origin/main`.
@@ -95,7 +95,7 @@ public struct BranchInfo: Sendable, Hashable, Identifiable {
     public var id: String { name }
 }
 
-public struct RemoteBranchInfo: Sendable, Hashable, Identifiable {
+public struct RemoteBranchInfo: Sendable, Hashable, Identifiable, Codable {
     /// Short name without the remote prefix, e.g. `feature/x`.
     public var name: String
     public var remote: String
@@ -105,7 +105,7 @@ public struct RemoteBranchInfo: Sendable, Hashable, Identifiable {
     public var id: String { "\(remote)/\(name)" }
 }
 
-public struct WorktreeInfo: Sendable, Hashable, Identifiable {
+public struct WorktreeInfo: Sendable, Hashable, Identifiable, Codable {
     public var path: String
     public var head: String
     /// Branch short name, or nil when detached.
@@ -206,7 +206,7 @@ public enum DiffScope: Sendable, Hashable {
 }
 
 /// A point-in-time read of a repository's state.
-public struct RepoSnapshot: Sendable, Hashable {
+public struct RepoSnapshot: Sendable, Hashable, Codable {
     public var remoteName: String?
     public var remoteURL: String?
     public var primaryBranch: String?

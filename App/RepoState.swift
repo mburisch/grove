@@ -7,6 +7,9 @@ import Observation
 final class RepoState: Identifiable {
     let path: String
     var snapshot: RepoSnapshot?
+    /// When `snapshot` was taken, if it was loaded from disk at launch and no refresh has replaced
+    /// it yet.
+    var snapshotSaved: Date?
     /// What the repository is doing right now, e.g. "Fetching…".
     var activity: String?
     /// Part of a batch (Fetch All, Pull All, a group fetch) but not started yet, e.g. "Waiting to fetch".
