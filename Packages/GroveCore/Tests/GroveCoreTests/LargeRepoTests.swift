@@ -84,7 +84,7 @@ import Testing
         #expect(again.branches.first { $0.name == "feature" }?.versusPrimary == AheadBehind(ahead: 0, behind: 2))
     }
 
-    @Test func fastForwardFromSnapshotSkipsStatus() async throws {
+    @Test func fastForwardFromSnapshotReadsStatusOnlyToMerge() async throws {
         let sb = try await Sandbox()
         defer { sb.cleanup() }
         let records = RunLog()
@@ -100,12 +100,22 @@ import Testing
         #expect(try await repo.fastForward(worktree: main) == .skipped("uncommitted changes"))
         #expect(records.total == 0)
 
-        // Clean and behind: only the merge runs.
+        // Clean in the snapshot but edited since (a file the update doesn't touch): status is read
+        // again and the worktree is left alone.
         try await sb.git.run(["checkout", "--", "file1.txt"], in: repo.url)
+        main = try #require(try await repo.snapshot().mainWorktree)
+        try await sb.commit(in: repo.url, file: "local.txt", content: "l")
+        try await sb.git.run(["reset", "-q", "--soft", "HEAD~1"], in: repo.url)
+        records.reset()
+        #expect(try await repo.fastForward(worktree: main) == .skipped("uncommitted changes"))
+        #expect(records.count("status") == 1 && records.count("merge") == 0)
+        try await sb.git.run(["reset", "-q", "--hard"], in: repo.url)
+
+        // Clean and behind: status is read again, then the merge runs.
         main = try #require(try await repo.snapshot().mainWorktree)
         records.reset()
         #expect(try await repo.fastForward(worktree: main) == .updated(commits: 3))
-        #expect(records.total == 1 && records.count("merge") == 1)
+        #expect(records.total == 2 && records.count("status") == 1 && records.count("merge") == 1)
 
         // Up to date: nothing runs.
         main = try #require(try await repo.snapshot().mainWorktree)

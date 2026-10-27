@@ -566,23 +566,32 @@ public struct GitRepository: Sendable {
     }
 
     /// Like `fastForward(worktree:)`, but decides from `worktree` as a recent snapshot saw it instead
-    /// of reading its status again, which is slow in large checkouts. Worktrees that need nothing
-    /// cost no git run at all. If the worktree changed since, `merge --ff-only` still refuses to
-    /// overwrite local changes or to create a merge.
+    /// of reading its status again, which is slow in large checkouts. Worktrees the snapshot rules
+    /// out (`outcomeWithoutMerge`) cost no git run at all. One it would move has its status read
+    /// again first, so edits made since the snapshot still skip it.
     public func fastForward(worktree: WorktreeInfo) async throws -> FastForwardOutcome {
-        try await fastForward(worktree: worktree.path, branch: worktree.branch, upstream: worktree.upstream,
-                              tracking: worktree.tracking, status: worktree.status)
+        if let outcome = worktree.outcomeWithoutMerge { return outcome }
+        return try await fastForward(worktree: worktree.path)
     }
 
     private func fastForward(worktree path: String, branch: String?, upstream: String?, tracking: AheadBehind?,
                              status: WorkingTreeStatus) async throws -> FastForwardOutcome {
+        if let outcome = Self.outcomeWithoutMerge(branch: branch, upstream: upstream, tracking: tracking, status: status) {
+            return outcome
+        }
+        try await git.run(["merge", "--ff-only", "--no-stat", "@{upstream}"], in: URL(fileURLWithPath: path), timeout: .seconds(300))
+        return .updated(commits: tracking?.behind ?? 0)
+    }
+
+    /// What fast-forwarding comes to when it needs no merge; nil when it would merge.
+    static func outcomeWithoutMerge(branch: String?, upstream: String?, tracking: AheadBehind?,
+                                    status: WorkingTreeStatus) -> FastForwardOutcome? {
         guard branch != nil else { return .skipped("detached HEAD") }
         guard upstream != nil, let ab = tracking else { return .skipped("no upstream") }
         if ab.behind == 0 { return .upToDate }
         if ab.ahead > 0 { return .skipped("diverged (\(ab.ahead) local commits)") }
         if status.hasTrackedChanges { return .skipped("uncommitted changes") }
-        try await git.run(["merge", "--ff-only", "--no-stat", "@{upstream}"], in: URL(fileURLWithPath: path), timeout: .seconds(300))
-        return .updated(commits: ab.behind)
+        return nil
     }
 
     /// Moves a branch that is not checked out anywhere to its upstream, if that is a fast-forward.
@@ -825,5 +834,13 @@ final class LineSplitter: @unchecked Sendable {
             pending = parts.popLast() ?? ""
             return parts.filter { !$0.isEmpty }
         }
+    }
+}
+
+extension WorktreeInfo {
+    /// What fast-forwarding this worktree comes to as this snapshot saw it, when that needs no
+    /// merge; nil when it would merge (and its status is then read again first).
+    public var outcomeWithoutMerge: GitRepository.FastForwardOutcome? {
+        GitRepository.outcomeWithoutMerge(branch: branch, upstream: upstream, tracking: tracking, status: status)
     }
 }

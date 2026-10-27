@@ -849,19 +849,26 @@ final class AppModel {
             var skipped: [String] = []
             // Worktrees the pull left alone; the fetch's snapshot of them is still current.
             var unchanged: [WorktreeInfo] = []
+            // A worktree the snapshot would have moved turned out different when read again.
+            var changedSinceSnapshot = false
             let worktrees = snapshot.worktrees.filter { !$0.isPrunable }
             for (index, wt) in worktrees.enumerated() {
                 repo.activityStep = "fast-forward \(index + 1)/\(worktrees.count)"
                 do {
                     let outcome = isFresh ? try await git.fastForward(worktree: wt) : try await git.fastForward(worktree: wt.path)
+                    // One the snapshot would have moved had its status read again; if that left it
+                    // alone, it changed since the snapshot, so the next snapshot reads it too.
+                    let keepsSnapshot = isFresh && wt.outcomeWithoutMerge != nil
                     switch outcome {
                     case .updated: updated += 1
-                    case .upToDate: if isFresh { unchanged.append(wt) }
+                    case .upToDate:
+                        if keepsSnapshot { unchanged.append(wt) } else if isFresh { changedSinceSnapshot = true }
                     case .skipped(let reason):
-                        if isFresh { unchanged.append(wt) }
+                        if keepsSnapshot { unchanged.append(wt) } else if isFresh { changedSinceSnapshot = true }
                         if (wt.tracking?.behind ?? 0) > 0 { skipped.append("\(wt.branch ?? "HEAD"): \(reason)") }
                     }
                 } catch {
+                    if isFresh { changedSinceSnapshot = true }
                     skipped.append("\(wt.branch ?? "HEAD"): \(error.localizedDescription.unescapingUnicode)")
                 }
             }
@@ -869,9 +876,9 @@ final class AppModel {
                 if case .updated = try? await git.fastForward(branch: branch) { updated += 1 }
             }
             repo.lastMessage = Self.pullSummary(updated: updated, skipped: skipped)
-            // When nothing moved, the fetch's snapshot is still current; otherwise only what moved
-            // (and the refs) is read again.
-            if updated > 0 { await loadSnapshot(repo, reusing: unchanged) }
+            // When nothing moved and nothing turned out changed, the fetch's snapshot is still
+            // current; otherwise only what moved or changed (and the refs) is read again.
+            if updated > 0 || changedSinceSnapshot { await loadSnapshot(repo, reusing: unchanged) }
         }
     }
 
