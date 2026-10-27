@@ -11,6 +11,14 @@ final class RepoState: Identifiable {
     var activity: String?
     /// Part of a batch (Fetch All, Pull All, a group fetch) but not started yet, e.g. "Waiting to fetch".
     var queued: String?
+    /// When `activity` started, for showing how long a slow operation has been running.
+    var activityStarted: Date?
+    /// Where the running operation is, e.g. "status 3/7"; nil when there's nothing more to say.
+    var activityStep: String?
+    /// Worktrees whose status the running refresh hasn't read yet; their rows show older data.
+    var refreshingWorktrees: Set<String> = []
+    /// The user dismissed the suggestion to optimize git status (until the app restarts).
+    var tuningHintDismissed = false
     var lastError: String? {
         didSet { if lastError == nil { clobberedTags = []; lastErrorRun = nil } }
     }
@@ -111,10 +119,15 @@ final class RepoState: Identifiable {
             queued = nil
             activity = label
             let start = Date.now
+            activityStarted = start
+            activityStep = nil
             debugLog?.log("operation", ["repo": path, "label": label, "id": id, "phase": "start"])
             let trace = GitTrace(id: id)
             await GitTrace.$current.withValue(trace) { await operation() }
             activity = nil
+            activityStarted = nil
+            activityStep = nil
+            refreshingWorktrees = []
             var fields = trace.summary
             fields.merge(["repo": path, "label": label, "id": id, "phase": "end",
                           "wallSeconds": (Date.now.timeIntervalSince(start) * 1000).rounded() / 1000]) { $1 }

@@ -170,6 +170,11 @@ final class AppModel {
         settings(for: repo).profile == .large
     }
 
+    /// A large repo whose git status isn't optimized yet (see `confirmTuning`), unless dismissed.
+    func showsTuningHint(_ repo: RepoState) -> Bool {
+        isLarge(repo) && repo.tuning?.isApplied == false && !repo.tuningHintDismissed
+    }
+
     /// Sends a run to the Git Output page and, once finished, to the debug log.
     private var recordRun: @Sendable (GitRunRecord) -> Void {
         let log = gitLog
@@ -438,8 +443,16 @@ final class AppModel {
             if !options.writeIndexIn.isEmpty {
                 debugLog?.log("step", ["repo": repo.path, "step": "status writes index", "worktrees": options.writeIndexIn.sorted()])
             }
+            // Rows keep showing the previous snapshot; worktrees not read yet show a spinner.
+            defer {
+                repo.activityStep = nil
+                repo.refreshingWorktrees = []
+            }
             let snapshot = try await timed(repo, "snapshot") {
-                try await repository(repo).snapshot(options: options, cache: repo.comparisons)
+                try await repository(repo).snapshot(options: options, cache: repo.comparisons) { @MainActor progress in
+                    repo.activityStep = progress.step
+                    repo.refreshingWorktrees = progress.pendingWorktrees
+                }
             }
             for path in options.writeIndexIn { repo.indexWrittenAt[path] = started }
             repo.snapshot = snapshot
@@ -796,7 +809,9 @@ final class AppModel {
             let isFresh = repo.lastRefresh.map { Date.now.timeIntervalSince($0) < 60 } ?? false
             var updated = 0
             var skipped: [String] = []
-            for wt in snapshot.worktrees where !wt.isPrunable {
+            let worktrees = snapshot.worktrees.filter { !$0.isPrunable }
+            for (index, wt) in worktrees.enumerated() {
+                repo.activityStep = "fast-forward \(index + 1)/\(worktrees.count)"
                 do {
                     let outcome = isFresh ? try await git.fastForward(worktree: wt) : try await git.fastForward(worktree: wt.path)
                     switch outcome {

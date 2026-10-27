@@ -310,7 +310,8 @@ private struct RepoTreeRow: View {
 
             StatusCell(
                 worktree: main,
-                activity: repo.activity,
+                activity: repo.activity.map { _ in ActivityText.describe(repo) },
+                activityStarted: repo.activityStarted,
                 queued: repo.queued,
                 error: repo.lastError,
                 showTracking: true,
@@ -423,7 +424,8 @@ private struct WorktreeTreeRow: View {
             .padding(.leading, Column.indent)
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            StatusCell(worktree: worktree, activity: nil, queued: nil, error: nil, showTracking: false, loading: false)
+            StatusCell(worktree: worktree, activity: nil, queued: nil, error: nil, showTracking: false, loading: false,
+                       refreshing: repo.refreshingWorktrees.contains(worktree.path))
 
             HStack(spacing: 6) {
                 if (worktree.tracking?.behind ?? 0) > 0 {
@@ -571,24 +573,37 @@ private struct PathText: View {
 private struct StatusCell: View {
     let worktree: WorktreeInfo?
     let activity: String?
+    var activityStarted: Date?
     /// Waiting for its turn in a batch, e.g. "Waiting to fetch".
     let queued: String?
     let error: String?
     /// Repo rows show ahead/behind vs upstream; worktree rows show their diff vs primary.
     let showTracking: Bool
     let loading: Bool
+    /// The running refresh hasn't read this worktree's status yet; what's shown is from the last one.
+    var refreshing = false
 
     var body: some View {
         HStack(spacing: 6) {
             if let activity {
                 ProgressView().controlSize(.small)
                     .help(activity)
+                // How long, once it's slow.
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    if let elapsed = ActivityText.elapsed(since: activityStarted, now: context.date) {
+                        Text(elapsed).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                }
             } else if let queued {
                 Image(systemName: "clock")
                     .foregroundStyle(.secondary)
                     .help(queued)
             } else if loading {
                 ProgressView().controlSize(.small)
+            } else if refreshing {
+                ProgressView().controlSize(.mini)
+                    .opacity(0.6)
+                    .help("Refreshing; showing the last status")
             }
             if let error {
                 Image(systemName: "exclamationmark.triangle.fill")

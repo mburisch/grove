@@ -64,9 +64,9 @@ private struct RepoInspector: View {
                         .controlSize(.small)
                         .fixedSize()
                     Spacer()
-                    if let activity = repo.activity {
+                    if repo.activity != nil {
                         ProgressView().controlSize(.small)
-                        Text(activity).font(.caption).foregroundStyle(.secondary)
+                        ActivityText(repo: repo).font(.caption).foregroundStyle(.secondary).monospacedDigit()
                     } else if let queued = repo.queued {
                         Image(systemName: "clock").foregroundStyle(.secondary)
                         Text(queued).font(.caption).foregroundStyle(.secondary)
@@ -855,6 +855,13 @@ private struct RepoBanners: View {
         if let message = repo.lastMessage {
             Banner(text: message, style: .info, onDismiss: { repo.lastMessage = nil },
                    details: { model.showGitOutput(for: repo) })
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        if model.showsTuningHint(repo) {
+            Banner(text: "git status can be slow in a repository this big. Optimizing turns on git's file system monitor "
+                   + "and caches, so it looks only at what changed.",
+                   style: .info, action: ("Optimize…", { Task { await model.confirmTuning(repo) } }),
+                   actionDisabled: repo.activity != nil, onDismiss: { repo.tuningHintDismissed = true })
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         if repo.showsStorageWarning, let storage = repo.storage {

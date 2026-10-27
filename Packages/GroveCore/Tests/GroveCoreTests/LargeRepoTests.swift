@@ -206,6 +206,21 @@ import Testing
         #expect(await repo.tuning().changes.allSatisfy { $0.key == "core.fsmonitor" })
     }
 
+    @Test func snapshotReportsProgressInOrder() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        let repo = try await sb.clone("progress", mode: .full)
+        for name in ["one", "two"] {
+            try await repo.addWorktree(branch: "origin/main", at: sb.root.appendingPathComponent("progress-\(name)"))
+        }
+        let reports = Reports()
+        let snap = try await repo.snapshot { reports.add($0) }
+        let steps = reports.all.map(\.step).filter { $0.hasPrefix("status") }
+        #expect(steps == ["status 0/3", "status 1/3", "status 2/3", "status 3/3"])
+        #expect(reports.all.first?.pendingWorktrees == Set(snap.worktrees.map(\.path)))
+        #expect(reports.all.last { $0.step.hasPrefix("status") }?.pendingWorktrees.isEmpty == true)
+    }
+
     @Test func snapshotWritesIndexOnlyWhereAllowed() async throws {
         let sb = try await Sandbox()
         defer { sb.cleanup() }
@@ -339,6 +354,13 @@ import Testing
         custom.applyDefaults(.large)
         #expect(!custom.hasOverrides && custom.profile == .large)
     }
+}
+
+private final class Reports: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [GitRepository.SnapshotProgress] = []
+    func add(_ item: GitRepository.SnapshotProgress) { lock.withLock { items.append(item) } }
+    var all: [GitRepository.SnapshotProgress] { lock.withLock { items } }
 }
 
 private final class RunLog: @unchecked Sendable {

@@ -1,6 +1,34 @@
 import GroveCore
 import SwiftUI
 
+/// "Refreshing… · status 3/7 · 12s": what a repository is doing, how far it is and, once it has
+/// taken more than two seconds, for how long.
+struct ActivityText: View {
+    let repo: RepoState
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            Text(Self.describe(repo, now: context.date))
+        }
+    }
+
+    static func describe(_ repo: RepoState, now: Date = .now) -> String {
+        guard let activity = repo.activity else { return "" }
+        var parts = [activity]
+        if let step = repo.activityStep { parts.append(step) }
+        if let elapsed = elapsed(since: repo.activityStarted, now: now) { parts.append(elapsed) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// "12s" or "3m 05s", from two seconds on; nil before.
+    static func elapsed(since start: Date?, now: Date = .now) -> String? {
+        guard let start else { return nil }
+        let seconds = Int(now.timeIntervalSince(start))
+        guard seconds >= 2 else { return nil }
+        return seconds < 60 ? "\(seconds)s" : String(format: "%dm %02ds", seconds / 60, seconds % 60)
+    }
+}
+
 /// "↓3 ↑1" style counts; says "in sync" when there are none.
 struct AheadBehindBadge: View {
     let value: AheadBehind?

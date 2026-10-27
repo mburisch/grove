@@ -47,9 +47,19 @@ public struct GitRepository: Sendable {
         }
     }
 
+    /// How far a snapshot has got, for showing while it runs.
+    public struct SnapshotProgress: Sendable, Hashable {
+        /// The current step, e.g. "status 3/7" or "compare 12/40".
+        public var step: String
+        /// Worktrees whose status hasn't been read yet.
+        public var pendingWorktrees: Set<String>
+    }
+
     /// Reads remote, mode, worktrees and branches. Comparisons with the primary branch come from
-    /// `cache` when neither commit changed since an earlier snapshot.
-    public func snapshot(options: SnapshotOptions = SnapshotOptions(), cache: ComparisonCache? = nil) async throws -> RepoSnapshot {
+    /// `cache` when neither commit changed since an earlier snapshot. `progress` is awaited after
+    /// each step, so reports arrive in order.
+    public func snapshot(options: SnapshotOptions = SnapshotOptions(), cache: ComparisonCache? = nil,
+                         progress: (@Sendable (SnapshotProgress) async -> Void)? = nil) async throws -> RepoSnapshot {
         let cache = cache ?? ComparisonCache()
         let remoteName = try await primaryRemoteName()
         let remoteURL: String? = if let remoteName {
@@ -82,6 +92,8 @@ public struct GitRepository: Sendable {
         let worktreeRecords = GitParsers.parseWorktrees(
             try await git.output(["worktree", "list", "--porcelain"], in: url)
         ).filter { !$0.isBare }
+        var pending = Set(worktreeRecords.map(\.path))
+        await progress?(SnapshotProgress(step: "status 0/\(worktreeRecords.count)", pendingWorktrees: pending))
         let worktrees = try await withThrowingTaskGroup(of: (Int, WorktreeInfo).self) { group in
             for (index, record) in worktreeRecords.enumerated() {
                 group.addTask {
@@ -91,7 +103,11 @@ public struct GitRepository: Sendable {
                 }
             }
             var results: [(Int, WorktreeInfo)] = []
-            for try await item in group { results.append(item) }
+            for try await item in group {
+                results.append(item)
+                pending.remove(item.1.path)
+                await progress?(SnapshotProgress(step: "status \(results.count)/\(worktreeRecords.count)", pendingWorktrees: pending))
+            }
             return results.sorted { $0.0 < $1.0 }.map(\.1)
         }
 
@@ -145,7 +161,12 @@ public struct GitRepository: Sendable {
                 }
                 var iterator = jobs.makeIterator()
                 for _ in 0..<8 { if let job = iterator.next() { group.addTask(operation: job) } }
-                for await _ in group { if let job = iterator.next() { group.addTask(operation: job) } }
+                var done = 0
+                for await _ in group {
+                    if let job = iterator.next() { group.addTask(operation: job) }
+                    done += 1
+                    await progress?(SnapshotProgress(step: "compare \(done)/\(jobs.count)", pendingWorktrees: []))
+                }
             }
             // Fill in from the cache, which also holds comparisons made on demand (`comparison`).
             for i in branches.indices {
