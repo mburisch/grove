@@ -4,7 +4,13 @@ import Foundation
 /// a waiting caller that is cancelled leaves the queue and throws `CancellationError`.
 public final class GitLimiter: @unchecked Sendable {
     public static let defaultLimit = 4
+    /// Slots of the lane for large repositories. Two, so a long scan of a big checkout doesn't
+    /// also hold up the repo's quick runs (other worktrees' status, rev-parse), while two large
+    /// repos still can't fill the disk with more than two heavy runs at once.
+    public static let largeRepoLimit = 2
 
+    /// Lane name recorded with each run (e.g. "large"), for the debug log.
+    public let name: String?
     private let lock = NSLock()
     private var limit: Int
     private var running = 0
@@ -12,8 +18,9 @@ public final class GitLimiter: @unchecked Sendable {
     /// Waiters cancelled before their continuation was queued.
     private var cancelled: Set<UUID> = []
 
-    public init(limit: Int = GitLimiter.defaultLimit) {
+    public init(limit: Int = GitLimiter.defaultLimit, name: String? = nil) {
         self.limit = max(1, limit)
+        self.name = name
     }
 
     /// Changes the limit; a higher one starts waiting callers right away.

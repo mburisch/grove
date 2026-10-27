@@ -44,6 +44,29 @@ import Testing
     }
 }
 
+@Test func busyLaneDoesNotBlockAnother() async throws {
+    let large = GitLimiter(limit: 1, name: "large")
+    let normal = GitLimiter(limit: 1, name: "normal")
+    let holder = Task { try await large.withSlot { try await Task.sleep(for: .seconds(5)) } }
+    defer { holder.cancel() }
+    try await Task.sleep(for: .milliseconds(20))
+
+    let records = Records()
+    let git = GitRunner(limiter: normal, onRecord: { records.add($0) })
+    let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let start = Date.now
+    _ = try await git.run(["--version"], in: dir)
+    #expect(Date.now.timeIntervalSince(start) < 2)
+    #expect(records.last?.lane == "normal")
+}
+
+private final class Records: @unchecked Sendable {
+    private let lock = NSLock()
+    private var all: [GitRunRecord] = []
+    func add(_ record: GitRunRecord) { lock.withLock { all.append(record) } }
+    var last: GitRunRecord? { lock.withLock { all.last } }
+}
+
 private final class Gauge: @unchecked Sendable {
     private let lock = NSLock()
     private var current = 0

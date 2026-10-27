@@ -93,6 +93,9 @@ final class AppModel {
 
     /// Shared by every runner so the cap holds across repos and operations.
     @ObservationIgnored private let gitLimiter: GitLimiter
+    /// A separate lane for repos with the large profile, so their slow runs (a status that walks a
+    /// huge checkout) never take the slots other repos' quick runs need.
+    @ObservationIgnored private let largeRepoLimiter = GitLimiter(limit: GitLimiter.largeRepoLimit, name: "large")
 
     /// Records git runs and repository operations with timings while the Debug log setting is on.
     @ObservationIgnored private(set) var debugLog: DebugLog?
@@ -101,7 +104,7 @@ final class AppModel {
 
     init() {
         let config = store.load()
-        gitLimiter = GitLimiter(limit: config.maxParallelGitRuns)
+        gitLimiter = GitLimiter(limit: config.maxParallelGitRuns, name: "normal")
         self.config = config
         if config.debugLog { setDebugLog(true) }
     }
@@ -151,6 +154,11 @@ final class AppModel {
             limiter: gitLimiter,
             onRecord: recordRun
         )
+    }
+
+    /// Whether `repo` runs in the lanes for large repositories (git runs and batch operations).
+    private func isLarge(_ repo: RepoState) -> Bool {
+        settings(for: repo).profile == .large
     }
 
     /// Sends a run to the Git Output page and, once finished, to the debug log.
@@ -222,7 +230,9 @@ final class AppModel {
     }
 
     func repository(_ repo: RepoState) -> GitRepository {
-        GitRepository(url: repo.url, git: git)
+        var runner = git
+        if isLarge(repo) { runner.limiter = largeRepoLimiter }
+        return GitRepository(url: repo.url, git: runner)
     }
 
     /// `repo`'s settings with its profile's defaults filled in.
@@ -1161,8 +1171,10 @@ final class AppModel {
         pathMonitor = monitor
     }
 
-    /// Runs `body` for each repo with at most `limit` in flight.
     /// Runs `body` for each repo, a few at a time. Repos waiting their turn show `queuedLabel`.
+    /// Large repos take turns in a lane of their own, one at a time, beside up to `limit` others:
+    /// a long fetch or pull of a big repo neither waits for nor holds up the small ones, and two
+    /// big ones don't compete for the disk.
     private func runLimited(
         _ items: [RepoState],
         queuedLabel: String,
@@ -1175,6 +1187,15 @@ final class AppModel {
             await body(repo)
             repo.queued = nil
         }
+        let large = items.filter(isLarge)
+        let others = items.filter { !isLarge($0) }
+        async let largeLane: Void = runLane(large, limit: 1, run)
+        await runLane(others, limit: limit, run)
+        await largeLane
+    }
+
+    /// Runs `run` for each item with at most `limit` in flight.
+    private func runLane(_ items: [RepoState], limit: Int, _ run: @escaping @MainActor (RepoState) async -> Void) async {
         await withTaskGroup(of: Void.self) { group in
             var iterator = items.makeIterator()
             for _ in 0..<limit {

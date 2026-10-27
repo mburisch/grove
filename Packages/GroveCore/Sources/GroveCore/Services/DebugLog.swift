@@ -71,6 +71,7 @@ public final class DebugLog: @unchecked Sendable {
         ]
         if let directory = run.directory { fields["dir"] = directory }
         if let operation = run.operation { fields["op"] = operation }
+        if let lane = run.lane { fields["lane"] = lane }
         if let exitCode = run.exitCode { fields["exit"] = Int(exitCode) }
         if let failure = run.failure { fields["failure"] = failure }
         if run.failureExpected { fields["failureExpected"] = true }

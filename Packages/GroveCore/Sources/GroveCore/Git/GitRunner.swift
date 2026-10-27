@@ -83,6 +83,8 @@ public struct GitRunRecord: Sendable, Hashable, Identifiable {
     public var commandLine: String { ([tool] + arguments).joined(separator: " ") }
     /// The `GitTrace` (operation) the run was made for, if any.
     public var operation: String?
+    /// The `GitLimiter` lane the run waited in, if it has a name.
+    public var lane: String?
     /// "status", "diff", … ("gh pr" for GitHub lookups).
     public var subcommand: String {
         let name = arguments.first { !$0.hasPrefix("-") } ?? ""
@@ -193,6 +195,7 @@ public struct GitRunner: Sendable {
         record.failureExpected = !check
         let trace = GitTrace.current
         record.operation = trace?.id
+        record.lane = limiter?.name
         defer { trace?.add(record) }
         onRecord?(record)
         var outcome: Result<Outcome, Error>
