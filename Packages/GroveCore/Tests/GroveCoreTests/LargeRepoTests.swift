@@ -164,6 +164,55 @@ import Testing
         #expect(bySubcommand["status"] == 1)
     }
 
+    @Test func tuningPlanRespectsHooksSplitIndexAndSupport() {
+        let fresh = RepoTuning.plan(fsmonitor: nil, untrackedCache: nil, manyFiles: nil, splitIndex: nil, fsmonitorAvailable: true)
+        #expect(fresh.changes.map(\.key) == ["core.fsmonitor", "core.untrackedCache", "feature.manyFiles"])
+        #expect(fresh.proposesFSMonitor && !fresh.isApplied)
+
+        let hook = RepoTuning.plan(fsmonitor: ".git/hooks/query-watchman", untrackedCache: "true", manyFiles: "true",
+                                   splitIndex: nil, fsmonitorAvailable: true)
+        #expect(hook.isApplied && hook.settings[0].note != nil)
+
+        let split = RepoTuning.plan(fsmonitor: "true", untrackedCache: "true", manyFiles: nil, splitIndex: "true",
+                                    fsmonitorAvailable: true)
+        #expect(split.isApplied)
+        #expect(split.settings.first { $0.key == "feature.manyFiles" }?.proposed == nil)
+
+        let noDaemon = RepoTuning.plan(fsmonitor: "false", untrackedCache: nil, manyFiles: nil, splitIndex: nil,
+                                       fsmonitorAvailable: false)
+        #expect(noDaemon.changes.map(\.key) == ["core.untrackedCache", "feature.manyFiles"])
+    }
+
+    @Test func applyingTuningSetsConfigAndBuildsUntrackedCache() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        let repo = try await sb.clone("tune", mode: .full)
+        let current = await repo.tuning()
+        #expect(!current.isApplied)
+        // Without the monitor, so no daemon outlives the test.
+        let plan = RepoTuning.plan(fsmonitor: nil, untrackedCache: nil, manyFiles: nil, splitIndex: nil, fsmonitorAvailable: false)
+        try await repo.applyTuning(plan)
+
+        #expect(await sb.git.outputIfSuccess(["config", "--local", "--get", "core.untrackedCache"], in: repo.url) == "true")
+        #expect(await sb.git.outputIfSuccess(["config", "--local", "--get", "feature.manyFiles"], in: repo.url) == "true")
+        let index = try Data(contentsOf: repo.url.appendingPathComponent(".git/index"))
+        #expect(index.range(of: Data("UNTR".utf8)) != nil)  // The status wrote the untracked cache.
+    }
+
+    @Test func statusCanSkipUntrackedFiles() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        let repo = try await sb.clone("nountracked", mode: .full)
+        try "u".write(to: repo.url.appendingPathComponent("scratch.txt"), atomically: true, encoding: .utf8)
+
+        let snap = try await repo.snapshot(options: .init(untrackedFiles: false))
+        let main = try #require(snap.mainWorktree)
+        #expect(main.status.untracked == 0 && !main.status.untrackedCounted && !main.status.isClean)
+        // Details still list them: the status couldn't rule them out.
+        let details = await repo.worktreeDetails(path: main.path, primaryRef: snap.baseRef, knownStatus: main.status)
+        #expect(details.uncommitted.map(\.path) == ["scratch.txt"])
+    }
+
     @Test func storageAndPrefetch() async throws {
         let sb = try await Sandbox()
         defer { sb.cleanup() }

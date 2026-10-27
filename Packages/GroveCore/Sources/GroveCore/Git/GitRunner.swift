@@ -162,6 +162,8 @@ public struct GitRunner: Sendable {
     private static let launchAttempts = 3
 
     /// Runs git and returns its output, throwing `GitError` on a non-zero exit (unless `check` is false).
+    /// Git normally runs with `GIT_OPTIONAL_LOCKS=0`, so a status never writes the index and can't
+    /// collide with the user's own git commands; `optionalLocks` lets it write (e.g. to store caches).
     @discardableResult
     public func run(
         _ arguments: [String],
@@ -169,15 +171,18 @@ public struct GitRunner: Sendable {
         timeout: Duration = .seconds(300),
         check: Bool = true,
         input: Data? = nil,
+        optionalLocks: Bool = false,
         onStderr: (@Sendable (String) -> Void)? = nil
     ) async throws -> GitResult {
         let queued = Date.now
         let heavy = Self.isHeavy(arguments) ? heavyLimiter : nil
+        var environment = Self.environment
+        if optionalLocks { environment["GIT_OPTIONAL_LOCKS"] = nil }
         // The timeout starts once a slot is free, so waiting in the queue never times a run out.
         return try await Self.withSlot(of: heavy) {
             try await Self.withSlot(of: limiter) {
                 try await recorded(arguments, in: directory, queued: queued, timeout: timeout, check: check,
-                                   input: input, onStderr: onStderr)
+                                   input: input, environment: environment, onStderr: onStderr)
             }
         }
     }
@@ -210,6 +215,7 @@ public struct GitRunner: Sendable {
         timeout: Duration,
         check: Bool,
         input: Data?,
+        environment: [String: String],
         onStderr: (@Sendable (String) -> Void)?
     ) async throws -> GitResult {
         var record = GitRunRecord(id: UUID(), tool: tool, arguments: arguments, directory: directory?.path, started: .now)
@@ -224,7 +230,8 @@ public struct GitRunner: Sendable {
         var attempt = 1
         while true {
             do {
-                outcome = .success(try await launch(arguments, in: directory, timeout: timeout, input: input, onStderr: onStderr))
+                outcome = .success(try await launch(arguments, in: directory, timeout: timeout, input: input,
+                                                    environment: environment, onStderr: onStderr))
             } catch let failure as LaunchFailure where failure.isTransient && attempt < Self.launchAttempts {
                 attempt += 1
                 try? await Task.sleep(for: .milliseconds(100 * attempt))
@@ -297,12 +304,13 @@ public struct GitRunner: Sendable {
         in directory: URL?,
         timeout: Duration,
         input: Data?,
+        environment: [String: String],
         onStderr: (@Sendable (String) -> Void)?
     ) async throws -> Outcome {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: gitPath)
         process.arguments = arguments
-        process.environment = Self.environment
+        process.environment = environment
         if let directory { process.currentDirectoryURL = directory }
 
         let stdoutPipe = Pipe()

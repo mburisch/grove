@@ -53,6 +53,8 @@ public struct RepoSettings: Codable, Sendable, Hashable {
     public var compareAllBranches: Bool?
     /// Count changed lines (`git diff --shortstat`) for worktrees and branches.
     public var lineCounts: Bool?
+    /// Count untracked files in worktree status (`git status` without `--untracked-files=no`).
+    public var countUntracked: Bool?
 
     public init(fetchIntervalMinutes: Int? = nil, shallowDepth: Int? = nil) {
         self.fetchIntervalMinutes = fetchIntervalMinutes
@@ -62,6 +64,7 @@ public struct RepoSettings: Codable, Sendable, Hashable {
     /// True when any setting differs from the profile's defaults.
     public var hasOverrides: Bool {
         fetchIntervalMinutes != nil || fetchScope != nil || fetchTags != nil || compareAllBranches != nil || lineCounts != nil
+            || countUntracked != nil
     }
 
     /// Follows `profile` (nil = by size) with no individual overrides.
@@ -72,6 +75,7 @@ public struct RepoSettings: Codable, Sendable, Hashable {
         fetchTags = nil
         compareAllBranches = nil
         lineCounts = nil
+        countUntracked = nil
     }
 }
 
@@ -83,6 +87,9 @@ public struct EffectiveRepoSettings: Sendable, Hashable {
     public var fetchTags: Bool
     public var compareAllBranches: Bool
     public var lineCounts: Bool
+    /// On for both profiles: the untracked count is useful, and the repository tuning
+    /// (`RepoTuning`) makes it cheap. Turned off per repository where it is still too slow.
+    public var countUntracked = true
 
     /// The defaults for `profile`. Large repositories fetch at most hourly, and only when
     /// automatic fetching is on at all.
@@ -100,7 +107,7 @@ public struct EffectiveRepoSettings: Sendable, Hashable {
 
     public var fetchOptions: GitRepository.FetchOptions { .init(scope: fetchScope, tags: fetchTags) }
     public var snapshotOptions: GitRepository.SnapshotOptions {
-        .init(compareAllBranches: compareAllBranches, lineCounts: lineCounts)
+        .init(compareAllBranches: compareAllBranches, lineCounts: lineCounts, untrackedFiles: countUntracked)
     }
 }
 
@@ -204,6 +211,7 @@ public struct AppConfig: Codable, Sendable, Hashable {
         if let v = custom.fetchTags { result.fetchTags = v }
         if let v = custom.compareAllBranches { result.compareAllBranches = v }
         if let v = custom.lineCounts { result.lineCounts = v }
+        if let v = custom.countUntracked { result.countUntracked = v }
         return result
     }
 }

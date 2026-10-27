@@ -53,6 +53,9 @@ public struct WorkingTreeStatus: Sendable, Hashable {
     public var unstaged: Int = 0
     public var untracked: Int = 0
     public var conflicted: Int = 0
+    /// False when status skipped untracked files (`countUntracked` off): `untracked` is then 0
+    /// whether there are any or not.
+    public var untrackedCounted = true
 
     public init(staged: Int = 0, unstaged: Int = 0, untracked: Int = 0, conflicted: Int = 0) {
         self.staged = staged
@@ -63,7 +66,7 @@ public struct WorkingTreeStatus: Sendable, Hashable {
 
     /// Tracked modifications; untracked files alone do not block a fast-forward.
     public var hasTrackedChanges: Bool { staged + unstaged + conflicted > 0 }
-    public var isClean: Bool { !hasTrackedChanges && untracked == 0 }
+    public var isClean: Bool { !hasTrackedChanges && untrackedCounted && untracked == 0 }
 }
 
 public struct CommitSummary: Sendable, Hashable {

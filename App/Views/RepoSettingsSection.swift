@@ -89,6 +89,23 @@ struct RepoSettingsSection: View {
                           + "With Worktrees only, other branches are compared when you select them.")
                     Toggle("Count changed lines", isOn: binding(settings.lineCounts) { $0.lineCounts = $1 })
                         .help("Shows +/− line counts; each refresh then runs git diff on every worktree")
+                    Toggle("Count untracked files", isOn: binding(settings.countUntracked) { $0.countUntracked = $1 })
+                        .help("Off, git status skips looking for untracked files, which in a big checkout without "
+                              + "the untracked cache is most of its time. They still show in a worktree's file list.")
+                }
+            }
+            CardRow("Git status") {
+                HStack(spacing: 8) {
+                    if let tuning = repo.tuning {
+                        Text(tuning.isApplied ? "Optimized" : "Not optimized")
+                            .foregroundStyle(tuning.isApplied || settings.profile == .normal ? Color.primary : .orange)
+                            .help(tuning.settings.map { "\($0.key): \($0.current ?? "not set")" }.joined(separator: "\n"))
+                    } else {
+                        Text("…").foregroundStyle(.secondary)
+                    }
+                    Button("Optimize…") { Task { await model.confirmTuning(repo) } }
+                        .disabled(repo.tuning?.isApplied ?? true)
+                        .help("Turn on git's file system monitor, untracked cache and many-files index for this repository")
                 }
             }
             CardRow("Storage") {
@@ -121,6 +138,7 @@ struct RepoSettingsSection: View {
         .font(.callout)
         .controlSize(.small)
         .disabled(repo.activity != nil)
+        .task(id: repo.path) { await model.loadTuning(repo) }
     }
 
     private func profileNote(_ custom: RepoSettings) -> String {

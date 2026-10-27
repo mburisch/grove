@@ -25,11 +25,16 @@ public struct GitRepository: Sendable {
         /// Count changed lines with `git diff --shortstat`.
         public var lineCounts = true
         public var maxComparisons = 40
+        /// Count untracked files in each worktree's status. Off, status skips the search for them,
+        /// which in a big checkout without the untracked cache is most of its time.
+        public var untrackedFiles = true
 
-        public init(compareAllBranches: Bool = true, lineCounts: Bool = true, maxComparisons: Int = 40) {
+        public init(compareAllBranches: Bool = true, lineCounts: Bool = true, maxComparisons: Int = 40,
+                    untrackedFiles: Bool = true) {
             self.compareAllBranches = compareAllBranches
             self.lineCounts = lineCounts
             self.maxComparisons = maxComparisons
+            self.untrackedFiles = untrackedFiles
         }
     }
 
@@ -67,7 +72,8 @@ public struct GitRepository: Sendable {
             for (index, record) in worktreeRecords.enumerated() {
                 group.addTask {
                     (index, await worktreeInfo(record, isMain: index == 0, compareTo: target,
-                                               lineCounts: options.lineCounts, cache: cache))
+                                               lineCounts: options.lineCounts, untrackedFiles: options.untrackedFiles,
+                                               cache: cache))
                 }
             }
             var results: [(Int, WorktreeInfo)] = []
@@ -190,7 +196,7 @@ public struct GitRepository: Sendable {
     }
 
     private func worktreeInfo(_ record: GitParsers.WorktreeRecord, isMain: Bool, compareTo target: CompareTarget?,
-                              lineCounts: Bool, cache: ComparisonCache?) async -> WorktreeInfo {
+                              lineCounts: Bool, untrackedFiles: Bool, cache: ComparisonCache?) async -> WorktreeInfo {
         let wtURL = URL(fileURLWithPath: record.path)
         var info = WorktreeInfo(
             path: record.path,
@@ -208,7 +214,8 @@ public struct GitRepository: Sendable {
         )
         guard !record.isPrunable, FileManager.default.fileExists(atPath: record.path) else { return info }
 
-        async let statusOutput = git.outputIfSuccess(["status", "--porcelain=v2", "--branch"], in: wtURL)
+        async let statusOutput = git.outputIfSuccess(
+            ["status", "--porcelain=v2", "--branch"] + (untrackedFiles ? [] : ["--untracked-files=no"]), in: wtURL)
         async let uncommitted: String? = lineCounts ? git.outputIfSuccess(["diff", "--shortstat", "HEAD"], in: wtURL) : nil
         async let versus: (count: AheadBehind?, diff: DiffStat?)? = if let target, !record.head.isEmpty {
             comparison(of: record.head, to: target, diff: lineCounts, cache: cache)
@@ -217,6 +224,7 @@ public struct GitRepository: Sendable {
         if let statusOutput = await statusOutput {
             let status = GitParsers.parseStatus(statusOutput)
             info.status = status.status
+            info.status.untrackedCounted = untrackedFiles
             info.upstream = status.upstream
             info.tracking = status.aheadBehind
         }
@@ -254,7 +262,7 @@ public struct GitRepository: Sendable {
                                 maxCommits: Int = 50) async -> WorktreeDetails {
         let wt = URL(fileURLWithPath: path)
         let clean = knownStatus.map { !$0.hasTrackedChanges } ?? false
-        let noUntracked = knownStatus?.untracked == 0
+        let noUntracked = knownStatus.map { $0.untrackedCounted && $0.untracked == 0 } ?? false
         async let head = git.outputIfSuccess(["log", "-1", "--format=\(GitParsers.logFormat)", "HEAD"], in: wt)
         async let uncommitted: [FileChange] = clean ? [] : fileChanges(against: "HEAD", in: wt)
         async let untracked: String? = noUntracked ? nil

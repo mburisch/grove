@@ -39,6 +39,8 @@ final class RepoState: Identifiable {
     /// Object storage size, read before the first snapshot and after fetches and clean-ups.
     var storage: RepoStorage?
     var prefetch: PrefetchStatus?
+    /// Git settings for big checkouts and whether they're on; read when the settings are shown.
+    var tuning: RepoTuning?
     /// The user dismissed the clean-up suggestion (until the app restarts or the repo is cleaned up).
     var storageWarningDismissed = false
 

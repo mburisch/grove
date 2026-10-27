@@ -1065,6 +1065,54 @@ final class AppModel {
         }
     }
 
+    func loadTuning(_ repo: RepoState) async {
+        repo.tuning = await repository(repo).tuning()
+    }
+
+    /// Shows the tuning settings' current and new values, then sets them and builds the caches.
+    func confirmTuning(_ repo: RepoState) async {
+        let tuning = await repository(repo).tuning()
+        repo.tuning = tuning
+        guard !tuning.isApplied else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Speed up git status in \(repo.name)?"
+        var lines = tuning.settings.map { setting in
+            let current = setting.current ?? "not set"
+            if setting.needsChange, let proposed = setting.proposed { return "• \(setting.key): \(current) → \(proposed)" }
+            if let note = setting.note { return "• \(setting.key): \(current). \(note)" }
+            return "• \(setting.key): \(current) (already on)"
+        }
+        lines.append("")
+        lines.append("These go in the repository's config (.git/config), so they apply to all its worktrees and to the git "
+                     + "commands you run yourself. Undo one with: git config --unset <name>")
+        if tuning.proposesFSMonitor {
+            lines.append("")
+            lines.append("The file system monitor keeps one background process per worktree (git fsmonitor--daemon). It "
+                         + "uses some memory, and CPU while many files change. Stop it with: git fsmonitor--daemon stop")
+        }
+        lines.append("")
+        lines.append("Grove then runs git status once in each worktree to build the caches; that takes about as long as "
+                     + "a status does now.")
+        alert.informativeText = lines.joined(separator: "\n")
+        alert.addButton(withTitle: "Apply")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.last?.keyEquivalent = "\u{1b}"
+        NSApp.activate()
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        await repo.enqueue("Optimizing…") { [self] in
+            do {
+                try await repository(repo).applyTuning(tuning)
+                repo.lastMessage = "Turned on " + tuning.changes.map(\.key).joined(separator: ", ")
+            } catch {
+                repo.fail(error)
+            }
+            await loadTuning(repo)
+            await loadSnapshot(repo)
+        }
+    }
+
     static func bytes(_ count: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: count, countStyle: .file)
     }
