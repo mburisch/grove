@@ -32,6 +32,10 @@ public struct GitRepository: Sendable {
         /// which on a remote with many thousands of branches saves reading and parsing megabytes of
         /// refs on every refresh; `remoteBranches()` lists them on demand.
         public var remoteBranches = true
+        /// Worktrees whose status may write the index. Status normally doesn't (see `GitRunner.run`),
+        /// so the untracked cache and file system monitor position it stores go stale unless
+        /// something else rewrites the index; letting status write it now and then keeps them fresh.
+        public var writeIndexIn: Set<String> = []
 
         public init(compareAllBranches: Bool = true, lineCounts: Bool = true, maxComparisons: Int = 40,
                     untrackedFiles: Bool = true, remoteBranches: Bool = true) {
@@ -83,7 +87,7 @@ public struct GitRepository: Sendable {
                 group.addTask {
                     (index, await worktreeInfo(record, isMain: index == 0, compareTo: target,
                                                lineCounts: options.lineCounts, untrackedFiles: options.untrackedFiles,
-                                               cache: cache))
+                                               writeIndex: options.writeIndexIn.contains(record.path), cache: cache))
                 }
             }
             var results: [(Int, WorktreeInfo)] = []
@@ -229,7 +233,8 @@ public struct GitRepository: Sendable {
     }
 
     private func worktreeInfo(_ record: GitParsers.WorktreeRecord, isMain: Bool, compareTo target: CompareTarget?,
-                              lineCounts: Bool, untrackedFiles: Bool, cache: ComparisonCache?) async -> WorktreeInfo {
+                              lineCounts: Bool, untrackedFiles: Bool, writeIndex: Bool,
+                              cache: ComparisonCache?) async -> WorktreeInfo {
         let wtURL = URL(fileURLWithPath: record.path)
         var info = WorktreeInfo(
             path: record.path,
@@ -248,7 +253,8 @@ public struct GitRepository: Sendable {
         guard !record.isPrunable, FileManager.default.fileExists(atPath: record.path) else { return info }
 
         async let statusOutput = git.outputIfSuccess(
-            ["status", "--porcelain=v2", "--branch"] + (untrackedFiles ? [] : ["--untracked-files=no"]), in: wtURL)
+            ["status", "--porcelain=v2", "--branch"] + (untrackedFiles ? [] : ["--untracked-files=no"]), in: wtURL,
+            optionalLocks: writeIndex)
         async let uncommitted: String? = lineCounts ? git.outputIfSuccess(["diff", "--shortstat", "HEAD"], in: wtURL) : nil
         async let versus: (count: AheadBehind?, diff: DiffStat?)? = if let target, !record.head.isEmpty {
             comparison(of: record.head, to: target, diff: lineCounts, cache: cache)

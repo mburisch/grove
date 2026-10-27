@@ -398,8 +398,8 @@ public struct GitRunner: Sendable {
     }
 
     /// Run and return trimmed stdout, or nil on failure.
-    public func outputIfSuccess(_ arguments: [String], in directory: URL) async -> String? {
-        guard let result = try? await run(arguments, in: directory, timeout: .seconds(60), check: false),
+    public func outputIfSuccess(_ arguments: [String], in directory: URL, optionalLocks: Bool = false) async -> String? {
+        guard let result = try? await run(arguments, in: directory, timeout: .seconds(60), check: false, optionalLocks: optionalLocks),
               result.exitCode == 0 else { return nil }
         return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }

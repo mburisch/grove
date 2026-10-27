@@ -206,6 +206,22 @@ import Testing
         #expect(await repo.tuning().changes.allSatisfy { $0.key == "core.fsmonitor" })
     }
 
+    @Test func snapshotWritesIndexOnlyWhereAllowed() async throws {
+        let sb = try await Sandbox()
+        defer { sb.cleanup() }
+        let repo = try await sb.clone("writeindex", mode: .full)
+        try await sb.git.run(["config", "--local", "core.untrackedCache", "true"], in: repo.url)
+        let index = repo.url.appendingPathComponent(".git/index")
+        func hasUntrackedCache() throws -> Bool { try Data(contentsOf: index).range(of: Data("UNTR".utf8)) != nil }
+
+        _ = try await repo.snapshot()
+        #expect(try !hasUntrackedCache())  // Status normally leaves the index alone.
+        var options = GitRepository.SnapshotOptions()
+        options.writeIndexIn = [repo.url.path]
+        _ = try await repo.snapshot(options: options)
+        #expect(try hasUntrackedCache())
+    }
+
     @Test func leanSnapshotSkipsRemoteBranchesUntilAsked() async throws {
         let sb = try await Sandbox()
         defer { sb.cleanup() }

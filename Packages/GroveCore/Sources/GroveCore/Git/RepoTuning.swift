@@ -29,6 +29,11 @@ public struct RepoTuning: Sendable, Hashable {
     /// Every setting that can be changed already has its proposed value.
     public var isApplied: Bool { changes.isEmpty }
     public var proposesFSMonitor: Bool { changes.contains { $0.key == "core.fsmonitor" } }
+    /// The file system monitor or the untracked cache is on: both keep their state in the index,
+    /// which then needs writing now and then (`SnapshotOptions.writeIndexIn`).
+    public var usesIndexCaches: Bool {
+        settings.contains { ["core.fsmonitor", "core.untrackedCache"].contains($0.key) && Self.isTrue($0.current) }
+    }
 
     public init(settings: [Setting], fsmonitorAvailable: Bool) {
         self.settings = settings

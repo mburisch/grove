@@ -429,12 +429,19 @@ final class AppModel {
     private func loadSnapshot(_ repo: RepoState) async {
         // The size picks the profile, so read it before the first (possibly expensive) snapshot.
         if repo.storage == nil { await loadStorage(repo) }
+        if repo.tuning == nil { await loadTuning(repo) }
         do {
             let cachedComparisons = await repo.comparisons.count
             let started = Date.now
-            let snapshot = try await timed(repo, "snapshot") {
-                try await repository(repo).snapshot(options: settings(for: repo).snapshotOptions, cache: repo.comparisons)
+            var options = settings(for: repo).snapshotOptions
+            options.writeIndexIn = indexWritesDue(repo)
+            if !options.writeIndexIn.isEmpty {
+                debugLog?.log("step", ["repo": repo.path, "step": "status writes index", "worktrees": options.writeIndexIn.sorted()])
             }
+            let snapshot = try await timed(repo, "snapshot") {
+                try await repository(repo).snapshot(options: options, cache: repo.comparisons)
+            }
+            for path in options.writeIndexIn { repo.indexWrittenAt[path] = started }
             repo.snapshot = snapshot
             // When it started: changes made while it ran may be missing from it.
             repo.lastRefresh = started
@@ -477,6 +484,17 @@ final class AppModel {
         } catch {
             repo.fail(error)
         }
+    }
+
+    /// Worktrees whose status may write the index in the next snapshot: in a repo with the file
+    /// system monitor or untracked cache on, those not written by Grove within the last hour. Rare
+    /// enough that a git command of the user's seldom finds the index locked (it works on retry),
+    /// often enough that the caches don't go stale when the user's own git rarely writes the index.
+    private func indexWritesDue(_ repo: RepoState) -> Set<String> {
+        guard repo.tuning?.usesIndexCaches == true, let worktrees = repo.snapshot?.worktrees else { return [] }
+        return Set(worktrees.filter { !$0.isPrunable }.map(\.path).filter { path in
+            repo.indexWrittenAt[path].map { Date.now.timeIntervalSince($0) >= 3600 } ?? true
+        })
     }
 
     /// What a worktree's or branch's details depend on in a snapshot.

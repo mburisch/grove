@@ -47,6 +47,8 @@ final class RepoState: Identifiable {
     /// Last fetch that pruned deleted remote branches; background fetches of large repositories
     /// prune at most daily.
     var lastPrune: Date?
+    /// When a snapshot last let each worktree's status write the index, by worktree path.
+    @ObservationIgnored var indexWrittenAt: [String: Date] = [:]
     /// The user dismissed the clean-up suggestion (until the app restarts or the repo is cleaned up).
     var storageWarningDismissed = false
 
